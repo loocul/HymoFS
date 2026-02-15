@@ -237,10 +237,18 @@ index b64819a80..33f36a178 100644
  #endif
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..4812353bb
+index 000000000..acd298bc5
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2922 @@
+@@ -0,0 +1,2930 @@
++// SPDX-License-Identifier: Apache-2.0 OR GPL-2.0
++/*
++ * HymoFS - kernel path manipulation and hiding (in-tree / patch variant).
++ *
++ * License: Author's work under Apache-2.0; when built into or linked with
++ * the Linux kernel, GPL-2.0 applies for kernel compatibility.
++ */
++
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
