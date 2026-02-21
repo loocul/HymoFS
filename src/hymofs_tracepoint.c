@@ -16,12 +16,14 @@ static void hymo_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 	(void)data;
 	hymofs_handle_sys_enter_getfd(regs, id);
 	hymofs_handle_sys_enter_path(regs, id);
+	hymofs_handle_sys_enter_cmdline(regs, id);
 }
 
 static void hymo_sys_exit_handler(void *data, struct pt_regs *regs, long ret)
 {
 	(void)data;
 	hymofs_handle_sys_exit_getfd(regs, ret);
+	hymofs_handle_sys_exit_cmdline(regs, ret);
 }
 
 int hymofs_tracepoint_path_init(void)

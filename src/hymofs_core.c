@@ -42,6 +42,8 @@
 #include <linux/utsname.h>
 #include <linux/mount.h>
 #include <linux/xattr.h>
+#include <linux/seq_file.h>
+#include <asm/unistd.h>
 #include "hymofs_lkm.h"
 #include "hymofs_ftrace.h"
 #include "hymofs_tracepoint.h"
@@ -165,6 +167,11 @@ static char *hymo_current_mirror_name = hymo_mirror_name_buf;
 static struct hymo_spoof_uname hymo_spoof_uname_store;
 static DEFINE_SPINLOCK(hymo_uname_lock);
 static bool hymo_uname_spoof_active;
+
+/* cmdline spoofing: storage and lock */
+static char hymo_spoof_cmdline[HYMO_FAKE_CMDLINE_SIZE];
+static DEFINE_SPINLOCK(hymo_cmdline_lock);
+static bool hymo_cmdline_spoof_active;
 
 static pid_t hymo_daemon_pid;
 static DEFINE_SPINLOCK(hymo_daemon_lock);
@@ -1194,6 +1201,33 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
+	if (cmd == HYMO_IOC_SET_CMDLINE) {
+		struct hymo_spoof_cmdline c;
+		if (copy_from_user(&c, arg, sizeof(c)))
+			return -EFAULT;
+		spin_lock(&hymo_cmdline_lock);
+		strscpy(hymo_spoof_cmdline, c.cmdline, sizeof(hymo_spoof_cmdline));
+		hymo_cmdline_spoof_active = (c.cmdline[0] != '\0');
+		spin_unlock(&hymo_cmdline_lock);
+		return 0;
+	}
+
+	if (cmd == HYMO_IOC_GET_FEATURES) {
+		int features = 0;
+		if (hymo_uname_kprobe_registered)
+			features |= HYMO_FEATURE_UNAME_SPOOF;
+		if (hymo_cmdline_kprobe_registered || hymo_cmdline_kretprobe_registered ||
+		    (hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered()))
+			features |= HYMO_FEATURE_CMDLINE_SPOOF;
+		features |= HYMO_FEATURE_KSTAT_SPOOF;
+		features |= HYMO_FEATURE_MERGE_DIR;
+		if (hymo_getxattr_kprobe_registered)
+			features |= HYMO_FEATURE_SELINUX_BYPASS;
+		if (copy_to_user(arg, &features, sizeof(features)))
+			return -EFAULT;
+		return 0;
+	}
+
 	/* Commands that use hymo_syscall_arg */
 	if (copy_from_user(&req, arg, sizeof(req)))
 		return -EFAULT;
@@ -1698,6 +1732,14 @@ MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
 
+/* Per-CPU: cmdline spoof via tracepoint/kretprobe on read syscall */
+struct hymo_cmdline_read_ctx {
+	char __user *buf;
+	size_t count;
+	int active;
+};
+static DEFINE_PER_CPU(struct hymo_cmdline_read_ctx, hymo_cmdline_read_ctx);
+
 static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 {
 #if defined(__aarch64__)
@@ -1963,6 +2005,87 @@ static struct kretprobe hymo_krp_uname = {
 static int hymo_uname_kprobe_registered;
 
 /* ======================================================================
+ * cmdline spoofing: kprobe pre_handler on cmdline_proc_show
+ * When spoof active, write fake cmdline to seq_file and skip original.
+ * ====================================================================== */
+
+static int hymo_cmdline_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	struct seq_file *m;
+	bool did_spoof = false;
+	pid_t pid;
+
+	if (!hymo_cmdline_spoof_active)
+		return 0;
+	pid = task_tgid_vnr(current);
+	if (hymo_daemon_pid > 0 && pid == hymo_daemon_pid)
+		return 0;
+
+#if defined(__aarch64__)
+	m = (struct seq_file *)regs->regs[0];
+#elif defined(__x86_64__)
+	m = (struct seq_file *)regs->di;
+#else
+	return 0;
+#endif
+
+	spin_lock(&hymo_cmdline_lock);
+	if (hymo_spoof_cmdline[0]) {
+		seq_puts(m, hymo_spoof_cmdline);
+		seq_putc(m, '\n');
+		did_spoof = true;
+	}
+	spin_unlock(&hymo_cmdline_lock);
+
+	if (!did_spoof)
+		return 0;
+
+	/* Skip original: set PC to return address, return value 0 */
+#if defined(__aarch64__)
+	instruction_pointer_set(regs, regs->regs[30]);
+	regs->regs[0] = 0;
+#elif defined(__x86_64__)
+	instruction_pointer_set(regs, *(unsigned long *)regs->sp);
+	regs->sp += sizeof(unsigned long);
+	regs->ax = 0;
+#endif
+	return 1;
+}
+
+static struct kprobe hymo_kp_cmdline = {
+	.pre_handler = hymo_cmdline_pre,
+};
+static int hymo_cmdline_kprobe_registered;
+
+/* kretprobe fallback for cmdline when tracepoint unavailable */
+static int hymo_cmdline_read_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	hymofs_handle_sys_enter_cmdline(regs, __NR_read);
+	return 0;
+}
+
+static int hymo_cmdline_read_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	long ret;
+#if defined(__aarch64__)
+	ret = (long)regs->regs[0];
+#elif defined(__x86_64__)
+	ret = (long)regs->ax;
+#else
+	ret = 0;
+#endif
+	hymofs_handle_sys_exit_cmdline(regs, ret);
+	return 0;
+}
+
+static struct kretprobe hymo_krp_cmdline_read = {
+	.entry_handler = hymo_cmdline_read_entry,
+	.handler = hymo_cmdline_read_ret,
+	.maxactive = 64,
+};
+static int hymo_cmdline_kretprobe_registered;
+
+/* ======================================================================
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
  * ====================================================================== */
 
@@ -2138,7 +2261,6 @@ passthrough:
  */
 static long (*hymo_strncpy_from_user_nofault)(char *dst, const void __user *src, long count);
 
-#include <asm/unistd.h>
 #include <linux/sched/task_stack.h>
 
 #define HYMO_HIDE_PATH "/.hymo_hidden_placeholder"
@@ -2240,6 +2362,101 @@ void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret)
 	regs->uregs[0] = this_cpu_read(hymo_override_fd);
 #endif
 	this_cpu_write(hymo_override_active, 0);
+}
+
+/* Cmdline spoof: check if fd refers to /proc/cmdline (tracepoint + kretprobe path) */
+static bool hymo_fd_is_proc_cmdline(int fd)
+{
+	struct file *file;
+	struct dentry *dentry, *parent;
+	bool is_cmdline = false;
+
+	file = fget(fd);
+	if (!file)
+		return false;
+	dentry = file->f_path.dentry;
+	parent = dentry ? dentry->d_parent : NULL;
+	if (dentry && dentry->d_name.len == 7 &&
+	    memcmp(dentry->d_name.name, "cmdline", 7) == 0 && parent) {
+		/* Parent is "proc" dir or proc root (empty name) */
+		if ((parent->d_name.len == 5 && memcmp(parent->d_name.name, "proc", 5) == 0) ||
+		    parent->d_name.len == 0)
+			is_cmdline = true;
+	}
+	fput(file);
+	return is_cmdline;
+}
+
+void hymofs_handle_sys_enter_cmdline(struct pt_regs *regs, long id)
+{
+#if defined(__aarch64__) || defined(__x86_64__)
+	unsigned long fd, buf, count;
+
+	if (!hymo_cmdline_spoof_active)
+		return;
+	if (id != __NR_read)
+		return;
+	if (hymo_daemon_pid > 0 && task_tgid_vnr(current) == hymo_daemon_pid)
+		return;
+
+#if defined(__aarch64__)
+	fd = regs->regs[0];
+	buf = regs->regs[1];
+	count = regs->regs[2];
+#else
+	fd = regs->di;
+	buf = regs->si;
+	count = regs->dx;
+#endif
+
+	if (!hymo_fd_is_proc_cmdline((int)fd))
+		return;
+
+	this_cpu_ptr(hymo_cmdline_read_ctx)->buf = (char __user *)buf;
+	this_cpu_ptr(hymo_cmdline_read_ctx)->count = (size_t)count;
+	this_cpu_ptr(hymo_cmdline_read_ctx)->active = 1;
+#endif
+}
+
+void hymofs_handle_sys_exit_cmdline(struct pt_regs *regs, long ret)
+{
+#if defined(__aarch64__) || defined(__x86_64__)
+	struct hymo_cmdline_read_ctx *ctx;
+	size_t spoof_len, write_len;
+
+	ctx = this_cpu_ptr(&hymo_cmdline_read_ctx);
+	if (!ctx->active || ret <= 0)
+		goto out;
+	ctx->active = 0;
+
+	spin_lock(&hymo_cmdline_lock);
+	if (!hymo_spoof_cmdline[0]) {
+		spin_unlock(&hymo_cmdline_lock);
+		goto out;
+	}
+	spoof_len = strnlen(hymo_spoof_cmdline, sizeof(hymo_spoof_cmdline) - 1);
+	/* Original cmdline ends with \n; match that */
+	write_len = spoof_len + 1; /* +1 for \n */
+	if (write_len > ctx->count)
+		write_len = ctx->count;
+	if (write_len > 0) {
+		size_t n = (spoof_len < write_len) ? spoof_len : write_len - 1;
+		if (copy_to_user(ctx->buf, hymo_spoof_cmdline, n) == 0) {
+			if (n < write_len && copy_to_user(ctx->buf + n, "\n", 1) == 0)
+				write_len = n + 1;
+			else
+				write_len = n;
+#if defined(__aarch64__)
+			regs->regs[0] = (unsigned long)write_len;
+#else
+			regs->ax = (unsigned long)write_len;
+#endif
+		}
+	}
+	spin_unlock(&hymo_cmdline_lock);
+out:
+	(void)0;
+#endif
 }
 
 void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
@@ -3183,6 +3400,45 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
+	/* cmdline spoofing: tracepoint when available, else kretprobe on read, else kprobe on cmdline_proc_show */
+	if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
+		const char *read_sym =
+#if defined(__aarch64__)
+			"__arm64_sys_read";
+#elif defined(__x86_64__)
+			"__x64_sys_read";
+#else
+			NULL;
+#endif
+		unsigned long read_addr = read_sym ? hymofs_lookup_name(read_sym) : 0;
+
+		if (read_addr) {
+			hymo_krp_cmdline_read.kp.addr = (kprobe_opcode_t *)read_addr;
+			ret = register_kretprobe(&hymo_krp_cmdline_read);
+			if (ret == 0) {
+				pr_info("hymofs: cmdline spoofing via kretprobe on %s\n", read_sym);
+				hymo_cmdline_kretprobe_registered = 1;
+			}
+		}
+		if (!hymo_cmdline_kretprobe_registered) {
+			unsigned long cmdline_addr = hymofs_lookup_name("cmdline_proc_show");
+			if (cmdline_addr) {
+				hymo_kp_cmdline.addr = (kprobe_opcode_t *)cmdline_addr;
+				ret = register_kprobe(&hymo_kp_cmdline);
+				if (ret == 0) {
+					pr_info("hymofs: cmdline spoofing via kprobe on cmdline_proc_show\n");
+					hymo_cmdline_kprobe_registered = 1;
+				} else {
+					pr_warn("hymofs: register_kprobe(cmdline_proc_show) failed: %d\n", ret);
+				}
+			} else {
+				pr_warn("hymofs: cmdline_proc_show not found, cmdline spoofing disabled\n");
+			}
+		}
+	} else {
+		pr_info("hymofs: cmdline spoofing via tracepoint (sys_enter/sys_exit)\n");
+	}
+
 #if HYMOFS_VFS_KPROBES
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
@@ -3384,6 +3640,10 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
+	if (hymo_cmdline_kretprobe_registered)
+		unregister_kretprobe(&hymo_krp_cmdline_read);
+	if (hymo_cmdline_kprobe_registered)
+		unregister_kprobe(&hymo_kp_cmdline);
 	if (hymo_uname_kprobe_registered)
 		unregister_kretprobe(&hymo_krp_uname);
 	if (hymo_prctl_kprobe_registered)
