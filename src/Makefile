@@ -4,7 +4,8 @@ obj-m += hymofs_lkm.o
 hymofs_lkm-objs := hymofs_core.o hymofs_tracepoint.o hymofs_ftrace.o
 
 ccflags-y += -gz=none
-ccflags-y += $(call cc-option,-fno-sanitize=cfi)
+# Do NOT add -fno-sanitize=cfi here: init/exit must have kernel-expected CFI type for
+# do_one_initcall. Use HYMO_NOCFI only on functions that make indirect calls to resolved symbols.
 
 clean:
 	rm -rf .tmp_versions

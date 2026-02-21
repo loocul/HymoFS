@@ -196,6 +196,10 @@ static struct file *(*hymo_dentry_open)(const struct path *, int, const struct c
 /* Bypass d_path kprobe to avoid recursion when we need path inside iterate_dir/d_path handlers */
 static char *(*hymo_d_absolute_path)(const struct path *, char *, int);
 static char *(*hymo_dentry_path_raw)(const struct dentry *, char *, int);
+static char *(*hymo_d_path)(const struct path *, char *, int);
+static struct dentry *(*hymo_d_hash_and_lookup)(struct dentry *, const struct qstr *);
+/* path_put, dput, dget, iput, iterate_dir: use kernel exports directly (EXPORT_SYMBOL), no lookup */
+
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
 static void *hymo_vfs_getxattr_addr;
 
@@ -461,8 +465,8 @@ static HYMO_NOCFI void hymofs_populate_injected_list(const char *dir_path, struc
 			struct path resolved;
 			if (hymo_kern_path(dir_path, LOOKUP_FOLLOW, &resolved) == 0) {
 				dpath_buf = kmalloc(PATH_MAX, GFP_KERNEL);
-				if (dpath_buf) {
-					char *p = d_path(&resolved, dpath_buf, PATH_MAX);
+				if (dpath_buf && hymo_d_path) {
+					char *p = hymo_d_path(&resolved, dpath_buf, PATH_MAX);
 					if (!IS_ERR(p) && p[0] == '/' &&
 					    strcmp(p, dir_path) != 0) {
 						dpath_dir = p;
@@ -584,8 +588,8 @@ next_entry:
 				put_cred(cred);
 				path_put(&path);
 			}
-			kfree(target_node->target);
 		}
+		kfree(target_node->target);
 		list_del(&target_node->list);
 		kfree(target_node);
 	}
@@ -1279,8 +1283,8 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 
 			if (hymo_kern_path(src, LOOKUP_FOLLOW, &mpath) == 0) {
 				char *rbuf = kmalloc(PATH_MAX, GFP_KERNEL);
-				if (rbuf) {
-					char *res = d_path(&mpath, rbuf, PATH_MAX);
+				if (rbuf && hymo_d_path) {
+					char *res = hymo_d_path(&mpath, rbuf, PATH_MAX);
 					if (!IS_ERR(res) && res[0] == '/' &&
 					    strcmp(res, src) != 0)
 						resolved_src = kstrdup(res, GFP_KERNEL);
@@ -1365,7 +1369,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 
 		/* Try to resolve full path */
 		if (hymo_kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
-			char *res = d_path(&path, tmp_buf, PATH_MAX);
+			char *res = hymo_d_path ? hymo_d_path(&path, tmp_buf, PATH_MAX) : ERR_PTR(-ENOENT);
 			if (!IS_ERR(res)) {
 				resolved_src = kstrdup(res, GFP_KERNEL);
 				{
@@ -1402,7 +1406,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 					memcpy(p_str, src, l);
 					p_str[l] = '\0';
 					if (hymo_kern_path(p_str, LOOKUP_FOLLOW, &path) == 0) {
-						char *res = d_path(&path, tmp_buf, PATH_MAX);
+						char *res = hymo_d_path ? hymo_d_path(&path, tmp_buf, PATH_MAX) : ERR_PTR(-ENOENT);
 						if (!IS_ERR(res)) {
 							size_t rl = strlen(res);
 							size_t nl = strlen(ls);
@@ -1514,7 +1518,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (!tmp_buf) { ret = -ENOMEM; break; }
 
 		if (hymo_kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
-			char *res = d_path(&path, tmp_buf, PATH_MAX);
+			char *res = hymo_d_path ? hymo_d_path(&path, tmp_buf, PATH_MAX) : ERR_PTR(-ENOENT);
 			if (!IS_ERR(res))
 				resolved_src = kstrdup(res, GFP_KERNEL);
 			if (d_inode(path.dentry)) {
@@ -1743,6 +1747,11 @@ EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 static int hymo_syscall_nr_param = 142;
 module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
 MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 448). Primary path is SYS_reboot(142) via __arm64_sys_reboot kprobe.");
+
+/* Force skip sys_enter tracepoint (use kprobe). 1=skip, 0=try tracepoint first. */
+static int hymo_no_tracepoint_param;
+module_param_named(hymo_no_tracepoint, hymo_no_tracepoint_param, int, 0600);
+MODULE_PARM_DESC(hymo_no_tracepoint, "1=skip sys_enter tracepoint, use kprobe. 0=try tracepoint first (default).");
 
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
@@ -2104,7 +2113,7 @@ static struct kretprobe hymo_krp_cmdline_read = {
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
  * ====================================================================== */
 
-static HYMO_FILLDIR_RET_TYPE
+static HYMO_NOCFI HYMO_FILLDIR_RET_TYPE
 hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 		      int namlen, loff_t offset, u64 ino, unsigned int d_type)
 {
@@ -2159,7 +2168,7 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	 * replaces the original, just like original hymofs.c does.
 	 * Skip when merge target IS the dir we're listing (e.g. target path
 	 * resolved to same inode via symlink) - otherwise we'd hide everything. */
-	if (w->merge_target_count > 0 && w->parent_dentry) {
+	if (hymo_d_hash_and_lookup && w->merge_target_count > 0 && w->parent_dentry) {
 		int i;
 		for (i = 0; i < w->merge_target_count; i++) {
 			struct dentry *tgt = w->merge_target_dentries[i];
@@ -2168,7 +2177,7 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 			if (d_inode(tgt) && d_inode(tgt) == d_inode(w->parent_dentry))
 				continue;
 			{
-				struct dentry *child = d_hash_and_lookup(tgt,
+				struct dentry *child = hymo_d_hash_and_lookup(tgt,
 					&(struct qstr)QSTR_INIT(name, namlen));
 				if (child) {
 					dput(child);
@@ -2178,11 +2187,11 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 		}
 	}
 
-	if (w->dir_has_hidden && w->parent_dentry &&
+	if (hymo_d_hash_and_lookup && w->dir_has_hidden && w->parent_dentry &&
 	    !hymo_is_privileged_process() && hymo_should_apply_hide_rules()) {
 		struct dentry *child;
 
-		child = d_hash_and_lookup(w->parent_dentry,
+		child = hymo_d_hash_and_lookup(w->parent_dentry,
 				&(struct qstr)QSTR_INIT(name, namlen));
 		if (child) {
 			struct inode *cinode = d_inode(child);
@@ -3228,8 +3237,11 @@ static int __init hymofs_lkm_init(void)
 {
 	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
 
+	/* Resolve kallsyms first - broader symbol access than kprobe on some GKI kernels. */
+	hymofs_resolve_kallsyms_lookup();
+
 	/*
-	 * Resolve ALL VFS symbols via kprobe - GKI kernels protect these
+	 * Resolve ALL VFS symbols via kallsyms/kprobe - GKI kernels protect these
 	 * behind namespaces or don't export them at all.
 	 * Critical symbols fail the module load; optional ones just warn.
 	 */
@@ -3263,6 +3275,13 @@ static int __init hymofs_lkm_init(void)
 	hymo_strncpy_from_user_nofault = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
 	if (!hymo_strncpy_from_user_nofault)
 		pr_warn("hymofs: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
+	hymo_d_path = (void *)hymofs_lookup_name("d_path");
+	hymo_d_hash_and_lookup = (void *)hymofs_lookup_name("d_hash_and_lookup");
+	/* path_put, dput, dget, iput, iterate_dir: use kernel exports directly, no lookup */
+	if (!hymo_d_path)
+		pr_warn("hymofs: d_path not found, path resolution in populate/merge/hide may fail\n");
+	if (!hymo_d_hash_and_lookup)
+		pr_warn("hymofs: d_hash_and_lookup not found, merge dedup and hide filter disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
@@ -3278,9 +3297,6 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	/* Resolve kallsyms first so all lookups can use it (no kernel exports needed). */
-	hymofs_resolve_kallsyms_lookup();
-
 	/* Resolve /system device number for stat spoofing */
 	if (hymo_kern_path) {
 		struct path sys_path;
@@ -3294,8 +3310,9 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
-	/* Try tracepoint for path redirect + GET_FD first */
-	(void)hymofs_tracepoint_path_init();
+	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
+	if (!hymo_no_tracepoint_param)
+		(void)hymofs_tracepoint_path_init();
 
 	/* GET_FD: use tracepoint if available, else kprobe */
 	if (hymo_syscall_nr_param <= 0) {
