@@ -1748,13 +1748,15 @@ MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
 
-/* Per-CPU: cmdline spoof via tracepoint/kretprobe on read syscall */
+/* Per-CPU: cmdline spoof via tracepoint/kretprobe on read syscall (aarch64/x86_64 only) */
+#if defined(__aarch64__) || defined(__x86_64__)
 struct hymo_cmdline_read_ctx {
 	char __user *buf;
 	size_t count;
 	int active;
 };
 static DEFINE_PER_CPU(struct hymo_cmdline_read_ctx, hymo_cmdline_read_ctx);
+#endif
 
 static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 {
@@ -2377,6 +2379,7 @@ void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret)
 	this_cpu_write(hymo_override_active, 0);
 }
 
+#if defined(__aarch64__) || defined(__x86_64__)
 /* Cmdline spoof: check if fd refers to /proc/cmdline (tracepoint + kretprobe path) */
 static bool hymo_fd_is_proc_cmdline(int fd)
 {
@@ -2399,6 +2402,7 @@ static bool hymo_fd_is_proc_cmdline(int fd)
 	fput(file);
 	return is_cmdline;
 }
+#endif
 
 void hymofs_handle_sys_enter_cmdline(struct pt_regs *regs, long id)
 {
