@@ -1248,6 +1248,84 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
+	if (cmd == HYMO_IOC_GET_HOOKS) {
+		struct hymo_syscall_list_arg list_arg;
+		char *kbuf;
+		size_t buf_size, written = 0;
+		int n;
+
+		if (copy_from_user(&list_arg, arg, sizeof(list_arg)))
+			return -EFAULT;
+
+		buf_size = list_arg.size;
+		if (buf_size > 2048)
+			buf_size = 2048;
+
+		kbuf = kzalloc(buf_size, GFP_KERNEL);
+		if (!kbuf)
+			return -ENOMEM;
+
+		/* GET_FD */
+		if (hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered())
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "GET_FD: tracepoint (sys_enter/sys_exit)\n");
+		else if (hymo_ni_kprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "GET_FD: kprobe (ni_syscall nr=%d)\n", hymo_syscall_nr_param);
+		else if (hymo_reboot_kprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "GET_FD: kprobe (reboot nr=%d)\n", hymo_syscall_nr_param);
+		else
+			n = scnprintf(kbuf + written, buf_size - written, "GET_FD: none\n");
+		written += n;
+
+		/* Path redirect */
+		if (hymofs_tracepoint_path_registered())
+			n = scnprintf(kbuf + written, buf_size - written, "path: tracepoint (sys_enter)\n");
+		else if (hymo_getname_kprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written, "path: kprobe (getname_flags)\n");
+		else
+			n = scnprintf(kbuf + written, buf_size - written, "path: none\n");
+		written += n;
+
+		/* VFS hooks */
+		if (hymo_vfs_use_ftrace)
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "vfs_getattr,d_path,iterate_dir,vfs_getxattr: ftrace+kretprobe\n");
+		else
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "vfs_getattr,d_path,iterate_dir,vfs_getxattr: kprobe+kretprobe\n");
+		written += n;
+
+		/* uname */
+		n = scnprintf(kbuf + written, buf_size - written,
+			     "uname: %s\n", hymo_uname_kprobe_registered ? "kretprobe" : "none");
+		written += n;
+
+		/* cmdline */
+		if (hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered())
+			n = scnprintf(kbuf + written, buf_size - written, "cmdline: tracepoint (sys_enter/sys_exit)\n");
+		else if (hymo_cmdline_kretprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written, "cmdline: kretprobe (read)\n");
+		else if (hymo_cmdline_kprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written, "cmdline: kprobe (cmdline_proc_show)\n");
+		else
+			n = scnprintf(kbuf + written, buf_size - written, "cmdline: none\n");
+		written += n;
+
+		list_arg.size = written;
+		if (copy_to_user(arg, &list_arg, sizeof(list_arg))) {
+			kfree(kbuf);
+			return -EFAULT;
+		}
+		if (written && copy_to_user(list_arg.buf, kbuf, written)) {
+			kfree(kbuf);
+			return -EFAULT;
+		}
+		kfree(kbuf);
+		return 0;
+	}
+
 	/* Commands that use hymo_syscall_arg */
 	if (copy_from_user(&req, arg, sizeof(req)))
 		return -EFAULT;
@@ -1699,6 +1777,7 @@ static HYMO_NOCFI long hymofs_dev_ioctl(struct file *file, unsigned int cmd,
 	case HYMO_IOC_HIDE_OVERLAY_XATTRS:
 	case HYMO_IOC_ADD_MERGE_RULE:
 	case HYMO_IOC_SET_MIRROR_PATH:
+	case HYMO_IOC_GET_HOOKS:
 	case HYMO_IOC_SET_UNAME:
 		ret = hymo_dispatch_cmd(cmd, (void __user *)arg);
 		break;
