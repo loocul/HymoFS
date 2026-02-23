@@ -3476,8 +3476,10 @@ static int __init hymofs_lkm_init(void)
 
 	pr_alert("hymofs: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
-	if (!hymo_no_tracepoint_param)
+	if (!hymo_skip_getfd_param && !hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
+	else if (hymo_skip_getfd_param)
+		pr_alert("hymofs: skipping tracepoint (hymo_skip_getfd=1)\n");
 
 	pr_alert("hymofs: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
@@ -3486,7 +3488,8 @@ static int __init hymofs_lkm_init(void)
 		return -EINVAL;
 	}
 
-	if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
+	if (!hymo_skip_getfd_param &&
+	    (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered())) {
 		const char *ni_names[] = { "__arm64_sys_ni_syscall", "sys_ni_syscall", "__x64_sys_ni_syscall", NULL };
 		unsigned long ni_addr = 0;
 		int i, ret;
@@ -3514,9 +3517,11 @@ static int __init hymofs_lkm_init(void)
 		}
 		hymo_ni_kprobe_registered = 1;
 		pr_info("hymofs: GET_FD via kprobe on ni_syscall (nr=%d)\n", hymo_syscall_nr_param);
+	} else if (hymo_skip_getfd_param) {
+		pr_alert("hymofs: skipping GET_FD kprobes (hymo_skip_getfd=1)\n");
 	}
 
-	if (!hymofs_tracepoint_path_registered()) {
+	if (!hymo_skip_extra_kprobes_param && !hymofs_tracepoint_path_registered()) {
 		static const char *reboot_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_reboot", "sys_reboot", NULL
@@ -3549,7 +3554,7 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
-	if (!hymofs_tracepoint_path_registered()) {
+	if (!hymo_skip_extra_kprobes_param && !hymofs_tracepoint_path_registered()) {
 		static const char *prctl_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_prctl", "sys_prctl", NULL
@@ -3573,10 +3578,12 @@ static int __init hymofs_lkm_init(void)
 			if (ret == 0)
 				hymo_prctl_kprobe_registered = 1;
 		}
+	} else if (hymo_skip_extra_kprobes_param) {
+		pr_alert("hymofs: skipping extra kprobes (reboot,prctl,uname,cmdline)\n");
 	}
 
 	/* uname spoofing: kretprobe on newuname syscall */
-	{
+	if (!hymo_skip_extra_kprobes_param) {
 		static const char *uname_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_newuname", "sys_newuname", NULL
@@ -3605,7 +3612,7 @@ static int __init hymofs_lkm_init(void)
 	}
 
 	/* cmdline spoofing: tracepoint when available, else kretprobe on read, else kprobe on cmdline_proc_show */
-	{
+	if (!hymo_skip_extra_kprobes_param) {
 		int ret;
 		if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
 			const char *read_sym =
@@ -3648,6 +3655,7 @@ static int __init hymofs_lkm_init(void)
 
 	pr_alert("hymofs: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
+	if (!hymo_skip_vfs_param) {
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
 	{
@@ -3838,6 +3846,12 @@ static int __init hymofs_lkm_init(void)
 		hymo_vfs_use_ftrace ? "ftrace" : "kprobes",
 		hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
 			"sys_enter/sys_exit tracepoint" : "kprobes");
+	} else {
+		pr_alert("hymofs: skipping VFS hooks (hymo_skip_vfs=1)\n");
+		pr_info("hymofs: initialized (VFS hooks skipped, GET_FD via %s)\n",
+			hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
+				"sys_enter/sys_exit tracepoint" : "kprobes");
+	}
 #else
 	pr_info("hymofs: initialized (GET_FD only, VFS kprobes disabled)\n");
 #endif
@@ -3867,6 +3881,7 @@ static void __exit hymofs_lkm_exit(void)
 
 #if HYMOFS_VFS_KPROBES
 	hymofs_tracepoint_path_exit();
+	if (!hymo_skip_vfs_param) {
 #ifdef CONFIG_DYNAMIC_FTRACE
 	if (hymo_vfs_use_ftrace) {
 		hymofs_ftrace_unregister();
@@ -3890,6 +3905,7 @@ static void __exit hymofs_lkm_exit(void)
 			for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
 				unregister_kprobe(&hymofs_kprobes[i]);
 		}
+	}
 	}
 #endif
 
