@@ -155,9 +155,10 @@ struct hymo_kallsyms_cb_data {
 };
 
 #ifdef CONFIG_KALLSYMS
-static int hymo_kallsyms_cb(void *data, const char *name, unsigned long addr)
+static int hymo_kallsyms_cb(void *data, const char *name, struct module *mod, unsigned long addr)
 {
 	struct hymo_kallsyms_cb_data *cb_data = data;
+	(void)mod;
 	if (name && cb_data->target_name &&
 	    strcmp(name, cb_data->target_name) == 0) {
 		*cb_data->result_addr = addr;
