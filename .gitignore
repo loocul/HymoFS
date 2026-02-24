@@ -60,3 +60,5 @@ patch_workspace/
 
 # Telegram bot session (contains auth, do not commit)
 scripts/.hymobot_session
+
+.ddk-version

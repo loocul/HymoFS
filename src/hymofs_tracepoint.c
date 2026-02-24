@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/tracepoint.h>
+#include <asm/unistd.h>
 
 #include "hymofs_lkm.h"
 #include "hymofs_tracepoint.h"
@@ -11,13 +12,30 @@ static int tp_getfd_registered;
 static struct tracepoint *tp_sys_enter;
 static struct tracepoint *tp_sys_exit;
 
+/* Fast path: skip ~99% of syscalls we never handle */
+static inline bool hymo_syscall_id_relevant(long id)
+{
+	return id == __NR_openat || id == __NR_faccessat ||
+#ifdef __NR_newfstatat
+	       id == __NR_newfstatat ||
+#endif
+	       id == __NR_execve ||
+#ifdef __NR_execveat
+	       id == __NR_execveat ||
+#endif
+#ifdef __NR_openat2
+	       id == __NR_openat2 ||
+#endif
+	       id == __NR_reboot || id == __NR_prctl || id == __NR_read ||
+	       id == (long)hymo_syscall_nr_param;
+}
+
 static void hymo_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
 	(void)data;
-	/* Defensive: verify we have valid context */
-	if (!regs)
+	if (!regs || !current || current->pid == 0)
 		return;
-	if (!current || current->pid == 0)
+	if (!hymo_syscall_id_relevant(id))
 		return;
 	hymofs_handle_sys_enter_getfd(regs, id);
 	hymofs_handle_sys_enter_path(regs, id);

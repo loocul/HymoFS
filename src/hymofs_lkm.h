@@ -201,18 +201,23 @@ struct hymo_d_path_ri_data {
 
 #define HYMO_MAX_MERGE_TARGETS 4
 
-/* iterate_dir: wrapper passed as second arg so kernel runs our filldir filter. */
+/*
+ * iterate_dir: wrapper allocated per-invocation from slab cache and passed
+ * as second arg so kernel runs our filldir filter.  Heap-allocated (not
+ * per-CPU) so it survives preemption and CPU migration safely.
+ */
 struct hymofs_filldir_wrapper {
 	struct dir_context wrap_ctx;
 	struct dir_context *orig_ctx;
 	struct dentry *parent_dentry;
 	int dir_path_len;
 	bool dir_has_hidden;
-	const char *dir_path;	/* full path for inject lookup; points to per-CPU buf */
-	bool dir_has_inject;	/* merge/inject dir: inject entries before real ones */
-	bool inject_done;	/* inject already performed this iteration */
+	const char *dir_path;
+	bool dir_has_inject;
+	bool inject_done;
 	int merge_target_count;
 	struct dentry *merge_target_dentries[HYMO_MAX_MERGE_TARGETS];
+	char dir_path_buf[HYMO_ITERATE_PATH_BUF];
 };
 
 /* kretprobe instance data for iterate_dir (ftrace slot / kprobe mode) */
@@ -221,8 +226,6 @@ struct hymo_iterate_ri_data {
 	struct hymofs_filldir_wrapper *wrapper;
 };
 
-/* Per-CPU state for iterate_dir; defined in hymofs_core.c, used by hymofs_ftrace.c */
-DECLARE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
 DECLARE_PER_CPU(int, hymo_iterate_did_swap);
 
 /* ======================================================================
@@ -233,6 +236,9 @@ DECLARE_PER_CPU(int, hymo_iterate_did_swap);
 
 /* debug flag - defined in hymofs_lkm.c */
 extern bool hymo_debug_enabled;
+
+/* GET_FD ni_syscall nr (module param); used by tracepoint for early syscall filter */
+extern int hymo_syscall_nr_param;
 
 /* Called by syscall handler (e.g. KP) when userspace requests HYMO_CMD_GET_FD. Returns anon fd or negative errno. */
 int hymofs_get_anon_fd(void);

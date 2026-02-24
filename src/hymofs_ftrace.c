@@ -21,10 +21,10 @@
 #include "hymofs_lkm.h"
 #include "hymofs_ftrace.h"
 
-#define HYMO_FTRACE_SLOT_DEPTH 8
+#define HYMO_FTRACE_SLOT_DEPTH 16
 
 struct hymo_ftrace_slot {
-	int type; /* 0=getattr 1=dpath 2=iter 3=getxattr */
+	int type; /* 0=getattr 1=dpath 2=iter 3=getxattr, -2=skipped */
 	union {
 		struct hymo_getattr_ri_data getattr;
 		struct hymo_d_path_ri_data dpath;
@@ -35,6 +35,7 @@ struct hymo_ftrace_slot {
 
 static DEFINE_PER_CPU(struct hymo_ftrace_slot[HYMO_FTRACE_SLOT_DEPTH], hymo_ftrace_slots);
 static DEFINE_PER_CPU(int, hymo_ftrace_depth);
+static DEFINE_PER_CPU(int, hymo_ftrace_cb_ran);
 static unsigned long hymo_ft_addr[4];
 static struct ftrace_ops hymo_ftrace_ops;
 
@@ -72,6 +73,8 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	if (!hymo_ft_addr[0] && !hymo_ft_addr[1] && !hymo_ft_addr[2] && !hymo_ft_addr[3])
 		return;
 
+	this_cpu_write(hymo_ftrace_cb_ran, 0);
+
 	depth = this_cpu_read(hymo_ftrace_depth);
 	if (depth >= HYMO_FTRACE_SLOT_DEPTH || depth < 0)
 		return;
@@ -89,6 +92,7 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 
 	slot = &this_cpu_ptr(hymo_ftrace_slots)[depth];
 	this_cpu_write(hymo_ftrace_depth, depth + 1);
+	this_cpu_write(hymo_ftrace_cb_ran, 1);
 	slot->type = type;
 
 	if (type == 0) {
@@ -100,10 +104,17 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 		if (hymo_krp_d_path_entry(&ri, regs) != 0)
 			slot->type = -1;
 	} else if (type == 2) {
+		struct dir_context *ictx;
 		hymo_kp_iterate_dir_pre(&kp_dummy, regs);
-		slot->u.iter.did_swap = this_cpu_read(hymo_iterate_did_swap);
-		slot->u.iter.wrapper = slot->u.iter.did_swap ?
-			this_cpu_ptr(&hymo_iterate_wrapper) : NULL;
+		ictx = (struct dir_context *)regs->regs[1];
+		if (ictx && ictx->actor == hymofs_filldir_filter) {
+			slot->u.iter.did_swap = 1;
+			slot->u.iter.wrapper = container_of(ictx,
+				struct hymofs_filldir_wrapper, wrap_ctx);
+		} else {
+			slot->u.iter.did_swap = 0;
+			slot->u.iter.wrapper = NULL;
+		}
 	} else if (type == 3) {
 		struct kretprobe_instance ri = { .data = &slot->u.getxattr };
 		if (hymo_krp_vfs_getxattr_entry(&ri, regs) != 0)
@@ -116,8 +127,11 @@ int hymo_ftrace_krp_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	int depth;
 
 	(void)regs;
+	*(struct hymo_ftrace_slot **)ri->data = NULL;
+	if (!this_cpu_read(hymo_ftrace_cb_ran))
+		return 0;
 	depth = this_cpu_read(hymo_ftrace_depth);
-	if (depth > 0)
+	if (depth > 0 && depth <= HYMO_FTRACE_SLOT_DEPTH)
 		*(struct hymo_ftrace_slot **)ri->data =
 			&this_cpu_ptr(hymo_ftrace_slots)[depth - 1];
 	return 0;
@@ -129,7 +143,9 @@ int hymo_ftrace_krp_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	int depth;
 
 	slot = *(struct hymo_ftrace_slot **)ri->data;
-	if (slot && slot->type >= 0) {
+	if (!slot)
+		return 0;
+	if (slot->type >= 0) {
 		if (slot->type == 0) {
 			struct kretprobe_instance r = { .data = &slot->u.getattr };
 			hymo_krp_vfs_getattr_ret(&r, regs);
