@@ -2853,7 +2853,9 @@ static int hymo_statfs_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 			return 0;
 		if ((f_type & 0xffffffffUL) == OVERLAYFS_SUPER_MAGIC) {
 			f_type = (f_type & 0xffffffff00000000UL) | (d->spoof_f_type & 0xffffffffUL);
-			(void)copy_to_user(buf, &f_type, sizeof(f_type));
+			/* best-effort spoof; ignore write failure (kretprobe cannot change syscall return) */
+			if (copy_to_user(buf, &f_type, sizeof(f_type)))
+				(void)0;
 		}
 	}
 	return 0;
