@@ -2821,9 +2821,12 @@ static int hymo_statfs_entry(struct kretprobe_instance *ri, struct pt_regs *regs
 		if (hymo_kern_path(path_buf, 0, &p) != 0)
 			return 0;
 		if ((unsigned long)p.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
-			real_ino = hymo_d_real_inode(p.dentry);
+			real_ino = hymo_d_real_inode ? hymo_d_real_inode(p.dentry) : NULL;
 			if (real_ino && real_ino->i_sb != p.dentry->d_sb)
 				d->spoof_f_type = (unsigned long)real_ino->i_sb->s_magic;
+			else
+				/* Fallback when d_real_inode missing (e.g. older kernel): use EROFS to match typical resolved type */
+				d->spoof_f_type = (unsigned long)EROFS_SUPER_MAGIC;
 		}
 		path_put(&p);
 	}
