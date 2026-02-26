@@ -2073,6 +2073,10 @@ static HYMO_NOCFI long hymofs_dev_ioctl(struct file *file, unsigned int cmd,
 	case HYMO_IOC_SET_UNAME:
 	case HYMO_IOC_ADD_MAPS_RULE:
 	case HYMO_IOC_CLEAR_MAPS_RULES:
+	case HYMO_IOC_GET_FEATURES:
+	case HYMO_IOC_SET_MOUNT_HIDE:
+	case HYMO_IOC_SET_MAPS_SPOOF:
+	case HYMO_IOC_SET_STATFS_SPOOF:
 		ret = hymo_dispatch_cmd(cmd, (void __user *)arg);
 		break;
 	default:
