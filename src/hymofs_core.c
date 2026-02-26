@@ -211,8 +211,6 @@ static bool hymo_allowlist_loaded;
 /* Real-time allowlist check: bool __ksu_is_allow_uid(uid_t) - preferred over cached list */
 typedef bool (*hymo_ksu_is_allow_uid_fn)(uid_t uid);
 static hymo_ksu_is_allow_uid_fn hymo_ksu_is_allow_uid_ptr;
-/* True if ptr was obtained via symbol_get (must symbol_put at exit) */
-static bool hymo_ksu_is_allow_uid_via_symbol_get;
 
 /* hymofs_enabled declared above (used by hooks) */
 bool hymo_debug_enabled;
@@ -924,15 +922,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	if (!mutex_trylock(&hymo_config_mutex))
 		return false;
 
-	/* Resolve __ksu_is_allow_uid: prefer symbol_get (YukiSU export) over kallsyms */
-	if (!hymo_ksu_is_allow_uid_ptr) {
-		void *addr = symbol_get("__ksu_is_allow_uid");
-		if (addr && hymofs_valid_kernel_addr((unsigned long)addr)) {
-			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			hymo_ksu_is_allow_uid_via_symbol_get = true;
-		} else if (addr)
-			symbol_put(addr);
-	}
+	/* Resolve __ksu_is_allow_uid via kallsyms (YukiSU exports it; GKI may not export symbol_get) */
 	if (!hymo_ksu_is_allow_uid_ptr && hymofs_kallsyms_lookup_name) {
 		unsigned long addr = hymofs_kallsyms_lookup_name("__ksu_is_allow_uid");
 		if (addr && hymofs_valid_kernel_addr(addr))
@@ -4233,16 +4223,8 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("HymoFS: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("HymoFS: filp_open/kernel_read not found, allowlist disabled\n");
-	/* Resolve __ksu_is_allow_uid: prefer symbol_get (YukiSU export) over kallsyms */
+	/* Resolve __ksu_is_allow_uid via kallsyms (YukiSU exports it) */
 	{
-		void *addr = symbol_get("__ksu_is_allow_uid");
-		if (addr && hymofs_valid_kernel_addr((unsigned long)addr)) {
-			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
-			hymo_ksu_is_allow_uid_via_symbol_get = true;
-		} else if (addr)
-			symbol_put(addr);
-	}
-	if (!hymo_ksu_is_allow_uid_ptr) {
 		unsigned long addr = hymofs_lookup_name("__ksu_is_allow_uid");
 		if (addr && hymofs_valid_kernel_addr(addr))
 			hymo_ksu_is_allow_uid_ptr = (hymo_ksu_is_allow_uid_fn)addr;
@@ -4849,11 +4831,6 @@ static void __exit hymofs_lkm_exit(void)
 		rcu_barrier();
 		kfree(old_uname);
 		kfree(old_cmdline);
-	}
-	if (hymo_ksu_is_allow_uid_via_symbol_get && hymo_ksu_is_allow_uid_ptr) {
-		symbol_put(hymo_ksu_is_allow_uid_ptr);
-		hymo_ksu_is_allow_uid_ptr = NULL;
-		hymo_ksu_is_allow_uid_via_symbol_get = false;
 	}
 	if (hymo_filldir_cache)
 		kmem_cache_destroy(hymo_filldir_cache);
