@@ -44,6 +44,10 @@
 #include <linux/xattr.h>
 #include <linux/seq_file.h>
 #include <uapi/linux/magic.h>
+/* EROFS_SUPER_MAGIC may be missing in older kernel uapi headers */
+#ifndef EROFS_SUPER_MAGIC
+#define EROFS_SUPER_MAGIC 0xe0f5e1e2
+#endif
 #include <asm/unistd.h>
 #include "hymofs_lkm.h"
 #include "hymofs_ftrace.h"
