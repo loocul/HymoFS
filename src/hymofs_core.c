@@ -208,6 +208,12 @@ static DEFINE_MUTEX(hymo_maps_mutex);
 
 static bool hymo_allowlist_loaded;
 
+/* Real-time allowlist check: bool __ksu_is_allow_uid(uid_t) - preferred over cached list */
+typedef bool (*hymo_ksu_is_allow_uid_fn)(uid_t uid);
+static hymo_ksu_is_allow_uid_fn hymo_ksu_is_allow_uid_ptr;
+/* True if ptr was obtained via symbol_get (must symbol_put at exit) */
+static bool hymo_ksu_is_allow_uid_via_symbol_get;
+
 /* hymofs_enabled declared above (used by hooks) */
 bool hymo_debug_enabled;
 static bool hymo_stealth_enabled = true;
@@ -905,12 +911,6 @@ static void (*hymo_ihold)(struct inode *);
 typedef bool (*hymo_ksu_get_allow_list_fn)(int *array, u16 length, u16 *out_length,
 					   u16 *out_total, bool allow);
 static hymo_ksu_get_allow_list_fn hymo_ksu_get_allow_list_ptr;
-
-/* Real-time allowlist check: bool __ksu_is_allow_uid(uid_t) - preferred over cached list */
-typedef bool (*hymo_ksu_is_allow_uid_fn)(uid_t uid);
-static hymo_ksu_is_allow_uid_fn hymo_ksu_is_allow_uid_ptr;
-/* True if ptr was obtained via symbol_get (must symbol_put at exit) */
-static bool hymo_ksu_is_allow_uid_via_symbol_get;
 
 static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 {
