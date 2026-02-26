@@ -61,14 +61,14 @@ int hymofs_tracepoint_path_init(void)
 
 	addr = hymofs_lookup_name("__tracepoint_sys_enter");
 	if (!addr || IS_ERR_VALUE(addr)) {
-		pr_warn("hymofs: __tracepoint_sys_enter not found, falling back to getname_flags kprobe\n");
+		pr_warn("HymoFS: __tracepoint_sys_enter not found, falling back to getname_flags kprobe\n");
 		return 0;
 	}
 	tp_sys_enter = (struct tracepoint *)addr;
 
 	ret = tracepoint_probe_register(tp_sys_enter, hymo_sys_enter_handler, NULL);
 	if (ret) {
-		pr_warn("hymofs: tracepoint_probe_register(sys_enter) failed: %d\n", ret);
+		pr_warn("HymoFS: tracepoint_probe_register(sys_enter) failed: %d\n", ret);
 		tp_sys_enter = NULL;
 		return 0;
 	}
@@ -84,7 +84,7 @@ int hymofs_tracepoint_path_init(void)
 			tp_sys_exit = NULL;
 	}
 
-	pr_info("hymofs: sys_enter tracepoint (path+GET_FD)%s\n",
+	pr_info("HymoFS: sys_enter tracepoint (path+GET_FD)%s\n",
 		tp_getfd_registered ? ", sys_exit (GET_FD)" : "");
 	return 1;
 }

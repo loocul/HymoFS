@@ -139,14 +139,14 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 
 		ret = register_kprobe(&kp);
 		if (ret < 0) {
-			pr_alert("hymofs: kprobe %s failed: %d\n", name, ret);
+			pr_alert("HymoFS: kprobe %s failed: %d\n", name, ret);
 			return 0;
 		}
 		addr = (unsigned long)kp.addr;
 		unregister_kprobe(&kp);
 		/* Just check for NULL and error values, trust kernel kprobe result */
 		if (!addr || IS_ERR_VALUE(addr)) {
-			pr_alert("hymofs: symbol %s returned invalid addr 0x%lx\n", name, addr);
+			pr_alert("HymoFS: symbol %s returned invalid addr 0x%lx\n", name, addr);
 			return 0;
 		}
 		return addr;
@@ -159,21 +159,21 @@ static void hymofs_resolve_kallsyms_lookup(void)
 	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
 	int ret;
 
-	pr_alert("hymofs: resolving kallsyms_lookup_name...\n");
+	pr_alert("HymoFS: resolving kallsyms_lookup_name...\n");
 	ret = register_kprobe(&kp);
 	if (ret < 0) {
-		pr_alert("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
+		pr_alert("HymoFS: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
 		return;
 	}
 	if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
-		pr_alert("hymofs: kallsyms_lookup_name returned invalid address: 0x%lx\n",
+		pr_alert("HymoFS: kallsyms_lookup_name returned invalid address: 0x%lx\n",
 			(unsigned long)kp.addr);
 		unregister_kprobe(&kp);
 		return;
 	}
 	hymofs_kallsyms_lookup_name = (void *)kp.addr;
 	unregister_kprobe(&kp);
-	pr_alert("hymofs: kallsyms_lookup_name resolved @ 0x%lx\n",
+	pr_alert("HymoFS: kallsyms_lookup_name resolved @ 0x%lx\n",
 		(unsigned long)hymofs_kallsyms_lookup_name);
 }
 
@@ -2353,7 +2353,7 @@ static int hymo_prctl_pre(struct kprobe *p, struct pt_regs *regs)
 
 	fd_ptr = (int __user *)(unsigned long)arg2;
 	if (fd_ptr && put_user(fd, fd_ptr) != 0)
-		pr_err("hymofs: prctl GET_FD put_user failed\n");
+		pr_err("HymoFS: prctl GET_FD put_user failed\n");
 #elif defined(__x86_64__)
 	unsigned long option = regs->di;
 	unsigned long arg2 = regs->si;
@@ -2370,7 +2370,7 @@ static int hymo_prctl_pre(struct kprobe *p, struct pt_regs *regs)
 			return 0;
 		fd_ptr = (int __user *)(unsigned long)arg2;
 		if (fd_ptr && put_user(fd, fd_ptr) != 0)
-			pr_err("hymofs: prctl GET_FD put_user failed\n");
+			pr_err("HymoFS: prctl GET_FD put_user failed\n");
 	}
 #endif
 	return 0;
@@ -4124,11 +4124,11 @@ static struct kretprobe hymo_krp_vfs_getxattr;
 static int __init hymofs_lkm_init(void)
 {
 	/* Use pr_alert for early logging - more likely to survive crash */
-	pr_alert("hymofs: === INIT START v%s ===\n", HYMOFS_VERSION);
+	pr_alert("HymoFS: === INIT START v%s ===\n", HYMOFS_VERSION);
 
 	/* Dummy mode: exit immediately - for testing module loading itself */
 	if (hymo_dummy_mode_param) {
-		pr_alert("hymofs: DUMMY MODE - exiting immediately\n");
+		pr_alert("HymoFS: DUMMY MODE - exiting immediately\n");
 		return 0;
 	}
 
@@ -4136,23 +4136,23 @@ static int __init hymofs_lkm_init(void)
 		sizeof(struct hymofs_filldir_wrapper), 0,
 		SLAB_HWCACHE_ALIGN, NULL);
 	if (!hymo_filldir_cache) {
-		pr_alert("hymofs: failed to create filldir slab cache\n");
+		pr_alert("HymoFS: failed to create filldir slab cache\n");
 		return -ENOMEM;
 	}
 
-	pr_alert("hymofs: skip_kallsyms=%d skip_vfs=%d skip_extra=%d skip_getfd=%d\n",
+	pr_alert("HymoFS: skip_kallsyms=%d skip_vfs=%d skip_extra=%d skip_getfd=%d\n",
 		hymo_skip_kallsyms_param, hymo_skip_vfs_param,
 		hymo_skip_extra_kprobes_param, hymo_skip_getfd_param);
 
-	pr_alert("hymofs: STAGE 1: resolving kallsyms\n");
+	pr_alert("HymoFS: STAGE 1: resolving kallsyms\n");
 
 	/* Resolve kallsyms first - broader symbol access than kprobe on some GKI kernels. */
 	if (!hymo_skip_kallsyms_param)
 		hymofs_resolve_kallsyms_lookup();
 	else
-		pr_alert("hymofs: skipping kallsyms (using per-symbol kprobe)\n");
+		pr_alert("HymoFS: skipping kallsyms (using per-symbol kprobe)\n");
 
-	pr_alert("hymofs: STAGE 2: resolving VFS symbols\n");
+	pr_alert("HymoFS: STAGE 2: resolving VFS symbols\n");
 	/*
 	 * Resolve ALL VFS symbols via kallsyms/kprobe - GKI kernels protect these
 	 * behind namespaces or don't export them at all.
@@ -4160,22 +4160,22 @@ static int __init hymofs_lkm_init(void)
 	 */
 	hymo_kern_path = (void *)hymofs_lookup_name("kern_path");
 	if (!hymo_kern_path) {
-		pr_err("hymofs: FATAL - kern_path not found\n");
+		pr_err("HymoFS: FATAL - kern_path not found\n");
 		return -ENOENT;
 	}
 	hymo_strndup_user = (void *)hymofs_lookup_name("strndup_user");
 	if (!hymo_strndup_user) {
-		pr_err("hymofs: FATAL - strndup_user not found\n");
+		pr_err("HymoFS: FATAL - strndup_user not found\n");
 		return -ENOENT;
 	}
 	hymo_ihold = (void *)hymofs_lookup_name("ihold");
 	if (!hymo_ihold) {
-		pr_err("hymofs: FATAL - ihold not found\n");
+		pr_err("HymoFS: FATAL - ihold not found\n");
 		return -ENOENT;
 	}
 	hymo_getname_kernel = (void *)hymofs_lookup_name("getname_kernel");
 	if (!hymo_getname_kernel)
-		pr_warn("hymofs: getname_kernel not found, path redirect may fail\n");
+		pr_warn("HymoFS: getname_kernel not found, path redirect may fail\n");
 
 	/* Optional: allowlist support */
 	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
@@ -4187,25 +4187,25 @@ static int __init hymofs_lkm_init(void)
 	hymo_dentry_path_raw = (void *)hymofs_lookup_name("dentry_path_raw");
 	hymo_strncpy_from_user_nofault = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
 	if (!hymo_strncpy_from_user_nofault)
-		pr_warn("hymofs: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
+		pr_warn("HymoFS: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
 	hymo_d_path = (void *)hymofs_lookup_name("d_path");
 	hymo_d_hash_and_lookup = (void *)hymofs_lookup_name("d_hash_and_lookup");
 	/* path_put, dput, dget, iput, iterate_dir: use kernel exports directly, no lookup */
 	if (!hymo_d_path)
-		pr_warn("hymofs: d_path not found, path resolution in populate/merge/hide may fail\n");
+		pr_warn("HymoFS: d_path not found, path resolution in populate/merge/hide may fail\n");
 	if (!hymo_d_hash_and_lookup)
-		pr_warn("hymofs: d_hash_and_lookup not found, merge dedup and hide filter disabled\n");
+		pr_warn("HymoFS: d_hash_and_lookup not found, merge dedup and hide filter disabled\n");
 	hymo_d_real_inode = (void *)hymofs_lookup_name("d_real_inode");
 	if (!hymo_d_real_inode)
-		pr_warn("hymofs: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
+		pr_warn("HymoFS: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
-		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
+		pr_warn("HymoFS: filp_open/kernel_read not found, allowlist disabled\n");
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
-		pr_warn("hymofs: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
+		pr_warn("HymoFS: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
 	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
-		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
+		pr_warn("HymoFS: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 
-	pr_alert("hymofs: STAGE 3: initializing hash tables\n");
+	pr_alert("HymoFS: STAGE 3: initializing hash tables\n");
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
 	hash_init(hymo_targets);
@@ -4214,31 +4214,31 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	pr_alert("hymofs: STAGE 4: resolving /system path\n");
+	pr_alert("HymoFS: STAGE 4: resolving /system path\n");
 	/* Resolve /system device number for stat spoofing */
 	if (hymo_kern_path) {
 		struct path sys_path;
 		if (hymo_kern_path("/system", LOOKUP_FOLLOW, &sys_path) == 0) {
 			hymo_system_dev = sys_path.dentry->d_sb->s_dev;
-			pr_info("hymofs: /system dev=%u:%u\n",
+			pr_info("HymoFS: /system dev=%u:%u\n",
 				MAJOR(hymo_system_dev), MINOR(hymo_system_dev));
 			path_put(&sys_path);
 		} else {
-			pr_warn("hymofs: could not resolve /system for stat spoofing\n");
+			pr_warn("HymoFS: could not resolve /system for stat spoofing\n");
 		}
 	}
 
-	pr_alert("hymofs: STAGE 5: registering tracepoints\n");
+	pr_alert("HymoFS: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
 	if (!hymo_skip_getfd_param && !hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
 	else if (hymo_skip_getfd_param)
-		pr_alert("hymofs: skipping tracepoint (hymo_skip_getfd=1)\n");
+		pr_alert("HymoFS: skipping tracepoint (hymo_skip_getfd=1)\n");
 
-	pr_alert("hymofs: STAGE 6: registering GET_FD kprobes\n");
+	pr_alert("HymoFS: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
 	if (hymo_syscall_nr_param <= 0) {
-		pr_err("hymofs: hymo_syscall_nr must be positive (got %d)\n", hymo_syscall_nr_param);
+		pr_err("HymoFS: hymo_syscall_nr must be positive (got %d)\n", hymo_syscall_nr_param);
 		return -EINVAL;
 	}
 
@@ -4254,14 +4254,14 @@ static int __init hymofs_lkm_init(void)
 				break;
 		}
 		if (!ni_addr) {
-			pr_err("hymofs: ni_syscall not found\n");
+			pr_err("HymoFS: ni_syscall not found\n");
 			return -ENOENT;
 		}
 		hymo_kp_ni.addr = (kprobe_opcode_t *)ni_addr;
 		hymo_krp_ni.kp.addr = (kprobe_opcode_t *)ni_addr;
 		ret = register_kprobe(&hymo_kp_ni);
 		if (ret) {
-			pr_err("hymofs: register_kprobe(ni_syscall) failed: %d\n", ret);
+			pr_err("HymoFS: register_kprobe(ni_syscall) failed: %d\n", ret);
 			return ret;
 		}
 		ret = register_kretprobe(&hymo_krp_ni);
@@ -4270,9 +4270,9 @@ static int __init hymofs_lkm_init(void)
 			return ret;
 		}
 		hymo_ni_kprobe_registered = 1;
-		pr_info("hymofs: GET_FD via kprobe on ni_syscall (nr=%d)\n", hymo_syscall_nr_param);
+		pr_info("HymoFS: GET_FD via kprobe on ni_syscall (nr=%d)\n", hymo_syscall_nr_param);
 	} else if (hymo_skip_getfd_param) {
-		pr_alert("hymofs: skipping GET_FD kprobes (hymo_skip_getfd=1)\n");
+		pr_alert("HymoFS: skipping GET_FD kprobes (hymo_skip_getfd=1)\n");
 	}
 
 	if (!hymo_skip_extra_kprobes_param && !hymofs_tracepoint_path_registered()) {
@@ -4333,7 +4333,7 @@ static int __init hymofs_lkm_init(void)
 				hymo_prctl_kprobe_registered = 1;
 		}
 	} else if (hymo_skip_extra_kprobes_param) {
-		pr_alert("hymofs: skipping extra kprobes (reboot,prctl,uname,cmdline)\n");
+		pr_alert("HymoFS: skipping extra kprobes (reboot,prctl,uname,cmdline)\n");
 	}
 
 	/* uname spoofing: kretprobe on newuname syscall */
@@ -4359,7 +4359,7 @@ static int __init hymofs_lkm_init(void)
 			hymo_krp_uname.kp.addr = (kprobe_opcode_t *)uname_addr;
 			ret = register_kretprobe(&hymo_krp_uname);
 			if (ret == 0) {
-				pr_info("hymofs: uname spoofing via kretprobe on %s\n", uname_symbols[i]);
+				pr_info("HymoFS: uname spoofing via kretprobe on %s\n", uname_symbols[i]);
 				hymo_uname_kprobe_registered = 1;
 			}
 		}
@@ -4383,7 +4383,7 @@ static int __init hymofs_lkm_init(void)
 			hymo_krp_cmdline_read.kp.addr = (kprobe_opcode_t *)read_addr;
 			ret = register_kretprobe(&hymo_krp_cmdline_read);
 			if (ret == 0) {
-				pr_info("hymofs: cmdline spoofing via kretprobe on %s\n", read_sym);
+				pr_info("HymoFS: cmdline spoofing via kretprobe on %s\n", read_sym);
 				hymo_cmdline_kretprobe_registered = 1;
 			}
 		}
@@ -4393,17 +4393,17 @@ static int __init hymofs_lkm_init(void)
 				hymo_kp_cmdline.addr = (kprobe_opcode_t *)cmdline_addr;
 				ret = register_kprobe(&hymo_kp_cmdline);
 				if (ret == 0) {
-					pr_info("hymofs: cmdline spoofing via kprobe on cmdline_proc_show\n");
+					pr_info("HymoFS: cmdline spoofing via kprobe on cmdline_proc_show\n");
 					hymo_cmdline_kprobe_registered = 1;
 				} else {
-					pr_warn("hymofs: register_kprobe(cmdline_proc_show) failed: %d\n", ret);
+					pr_warn("HymoFS: register_kprobe(cmdline_proc_show) failed: %d\n", ret);
 				}
 			} else {
-				pr_warn("hymofs: cmdline_proc_show not found, cmdline spoofing disabled\n");
+				pr_warn("HymoFS: cmdline_proc_show not found, cmdline spoofing disabled\n");
 			}
 		}
 	} else {
-		pr_info("hymofs: cmdline spoofing via tracepoint (sys_enter/sys_exit)\n");
+		pr_info("HymoFS: cmdline spoofing via tracepoint (sys_enter/sys_exit)\n");
 	}
 	}
 
@@ -4435,36 +4435,8 @@ static int __init hymofs_lkm_init(void)
 				if (register_kretprobe(&hymo_krp_read_mount_filter) == 0) {
 					hymo_mount_hide_read_fallback_registered = 1;
 					use_read_path = true;
-					pr_info("hymofs: mount hide via kretprobe on %s (read buffer filter, preferred)\n",
+					pr_info("HymoFS: mount hide via kretprobe on %s (read buffer filter, preferred)\n",
 						read_syms[i]);
-					/* statfs f_type spoof so direct matches resolved (INCONSISTENT_MOUNT) */
-					{
-						static const char *statfs_syms[] = {
-#if defined(__aarch64__)
-							"__arm64_sys_statfs", "sys_statfs", NULL
-#elif defined(__x86_64__)
-							"__x64_sys_statfs", "sys_statfs", NULL
-#else
-							NULL
-#endif
-						};
-						unsigned long statfs_addr = 0;
-						int j;
-
-						for (j = 0; statfs_syms[j]; j++) {
-							statfs_addr = hymofs_lookup_name(statfs_syms[j]);
-							if (statfs_addr)
-								break;
-						}
-						if (statfs_addr) {
-							hymo_krp_statfs.kp.addr = (kprobe_opcode_t *)statfs_addr;
-							if (register_kretprobe(&hymo_krp_statfs) == 0) {
-								hymo_statfs_kretprobe_registered = 1;
-								pr_info("hymofs: statfs f_type spoof via kretprobe on %s\n",
-									statfs_syms[j]);
-							}
-						}
-					}
 				} else {
 					vfree(hymo_read_filter_buf);
 					hymo_read_filter_buf = NULL;
@@ -4475,31 +4447,64 @@ static int __init hymofs_lkm_init(void)
 			unsigned long addr_vfsmnt = hymofs_lookup_name("show_vfsmnt");
 			unsigned long addr_mountinfo = hymofs_lookup_name("show_mountinfo");
 			if (read_addr)
-				pr_info("hymofs: mount hide read path unavailable, falling back to kprobe\n");
+				pr_info("HymoFS: mount hide read path unavailable, falling back to kprobe\n");
 			else
-				pr_warn("hymofs: read syscall not found, trying kprobe on show_vfsmnt/show_mountinfo\n");
+				pr_warn("HymoFS: read syscall not found, trying kprobe on show_vfsmnt/show_mountinfo\n");
 			if (addr_vfsmnt) {
 				hymo_kp_show_vfsmnt.addr = (kprobe_opcode_t *)addr_vfsmnt;
 				if (register_kprobe(&hymo_kp_show_vfsmnt) == 0) {
 					hymo_mount_hide_vfsmnt_registered = 1;
-					pr_info("hymofs: mount hide via kprobe on show_vfsmnt (/proc/mounts)\n");
+					pr_info("HymoFS: mount hide via kprobe on show_vfsmnt (/proc/mounts)\n");
 				}
 			} else {
-				pr_warn("hymofs: show_vfsmnt not found\n");
+				pr_warn("HymoFS: show_vfsmnt not found\n");
 			}
 			if (addr_mountinfo) {
 				hymo_kp_show_mountinfo.addr = (kprobe_opcode_t *)addr_mountinfo;
 				if (register_kprobe(&hymo_kp_show_mountinfo) == 0) {
 					hymo_mount_hide_mountinfo_registered = 1;
-					pr_info("hymofs: mount hide via kprobe on show_mountinfo (/proc/pid/mountinfo)\n");
+					pr_info("HymoFS: mount hide via kprobe on show_mountinfo (/proc/pid/mountinfo)\n");
 				}
 			} else {
-				pr_warn("hymofs: show_mountinfo not found\n");
+				pr_warn("HymoFS: show_mountinfo not found\n");
+			}
+		}
+		/* statfs f_type spoof: always try to register (independent of mount hide path).
+		 * Makes direct statfs(path) match resolved f_type to avoid INCONSISTENT_MOUNT detection. */
+		if (!hymo_statfs_kretprobe_registered) {
+			static const char *statfs_syms[] = {
+#if defined(__aarch64__)
+				"__arm64_sys_statfs", "sys_statfs", NULL
+#elif defined(__x86_64__)
+				"__x64_sys_statfs", "sys_statfs", NULL
+#else
+				NULL
+#endif
+			};
+			unsigned long statfs_addr = 0;
+			int j;
+
+			for (j = 0; statfs_syms[j]; j++) {
+				statfs_addr = hymofs_lookup_name(statfs_syms[j]);
+				if (statfs_addr)
+					break;
+			}
+			if (statfs_addr) {
+				hymo_krp_statfs.kp.addr = (kprobe_opcode_t *)statfs_addr;
+				if (register_kretprobe(&hymo_krp_statfs) == 0) {
+					hymo_statfs_kretprobe_registered = 1;
+					pr_info("HymoFS: statfs f_type spoof via kretprobe on %s (INCONSISTENT_MOUNT bypass)\n",
+						statfs_syms[j]);
+				} else {
+					pr_warn("HymoFS: statfs kretprobe register failed\n");
+				}
+			} else {
+				pr_warn("HymoFS: statfs syscall not found, INCONSISTENT_MOUNT bypass disabled\n");
 			}
 		}
 	}
 
-	pr_alert("hymofs: STAGE 7: registering VFS hooks\n");
+	pr_alert("HymoFS: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
 	if (!hymo_skip_vfs_param) {
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
@@ -4517,7 +4522,7 @@ static int __init hymofs_lkm_init(void)
 			if (ret == 0) {
 				hymo_vfs_getxattr_addr = (void *)ft_addr[3];
 				hymo_vfs_use_ftrace = true;
-				pr_info("hymofs: ftrace registered for vfs_getattr, d_path, iterate_dir, vfs_getxattr\n");
+				pr_info("HymoFS: ftrace registered for vfs_getattr, d_path, iterate_dir, vfs_getxattr\n");
 				hymo_krp_vfs_getattr.kp.addr = (kprobe_opcode_t *)ft_addr[0];
 				hymo_krp_vfs_getattr.entry_handler = hymo_ftrace_krp_entry;
 				hymo_krp_vfs_getattr.handler = hymo_ftrace_krp_ret;
@@ -4559,7 +4564,7 @@ static int __init hymofs_lkm_init(void)
 					unregister_kretprobe(&hymo_krp_vfs_getxattr);
 				}
 			} else {
-				pr_warn("hymofs: ftrace registration failed: %d, falling back to kprobes\n", ret);
+				pr_warn("HymoFS: ftrace registration failed: %d, falling back to kprobes\n", ret);
 			}
 		}
 #endif
@@ -4568,7 +4573,7 @@ static int __init hymofs_lkm_init(void)
 		if (start_idx == 0) {
 			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[0].name);
 			if (!addr) {
-				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[0].name);
+				pr_err("HymoFS: symbol not found: %s\n", hymofs_vfs_hooks[0].name);
 				hymofs_tracepoint_path_exit();
 				return -ENOENT;
 			}
@@ -4576,11 +4581,11 @@ static int __init hymofs_lkm_init(void)
 			hymofs_kprobes[0].pre_handler = hymofs_vfs_hooks[0].pre;
 			ret = register_kprobe(&hymofs_kprobes[0]);
 			if (ret) {
-				pr_err("hymofs: register_kprobe(getname_flags) failed: %d\n", ret);
+				pr_err("HymoFS: register_kprobe(getname_flags) failed: %d\n", ret);
 				hymofs_tracepoint_path_exit();
 				return ret;
 			}
-			pr_info("hymofs: kprobe getname_flags @0x%lx\n", addr);
+			pr_info("HymoFS: kprobe getname_flags @0x%lx\n", addr);
 			hymo_getname_kprobe_registered = true;
 		}
 
@@ -4589,7 +4594,7 @@ static int __init hymofs_lkm_init(void)
 		for (i = 1; i < HYMOFS_VFS_HOOK_COUNT; i++) {
 			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[i].name);
 			if (!addr) {
-				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
+				pr_err("HymoFS: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
 				for (; i > 1; i--)
 					unregister_kprobe(&hymofs_kprobes[i - 1]);
 				if (start_idx == 0)
@@ -4601,7 +4606,7 @@ static int __init hymofs_lkm_init(void)
 			hymofs_kprobes[i].pre_handler = hymofs_vfs_hooks[i].pre;
 			ret = register_kprobe(&hymofs_kprobes[i]);
 			if (ret) {
-				pr_err("hymofs: register_kprobe(%s) failed: %d\n",
+				pr_err("HymoFS: register_kprobe(%s) failed: %d\n",
 				       hymofs_vfs_hooks[i].name, ret);
 				for (; i > 1; i--)
 					unregister_kprobe(&hymofs_kprobes[i - 1]);
@@ -4610,7 +4615,7 @@ static int __init hymofs_lkm_init(void)
 				hymofs_tracepoint_path_exit();
 				return ret;
 			}
-			pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
+			pr_info("HymoFS: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
 		}
 
 		/* kretprobes for vfs_getattr, d_path, iterate_dir (modify after return) */
@@ -4621,7 +4626,7 @@ static int __init hymofs_lkm_init(void)
 		hymo_krp_vfs_getattr.maxactive = 64;
 		ret = register_kretprobe(&hymo_krp_vfs_getattr);
 		if (ret) {
-			pr_err("hymofs: register_kretprobe(vfs_getattr) failed: %d\n", ret);
+			pr_err("HymoFS: register_kretprobe(vfs_getattr) failed: %d\n", ret);
 			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
 				unregister_kprobe(&hymofs_kprobes[i - 1]);
 			if (start_idx == 0)
@@ -4636,7 +4641,7 @@ static int __init hymofs_lkm_init(void)
 		hymo_krp_d_path.maxactive = 64;
 		ret = register_kretprobe(&hymo_krp_d_path);
 		if (ret) {
-			pr_err("hymofs: register_kretprobe(d_path) failed: %d\n", ret);
+			pr_err("HymoFS: register_kretprobe(d_path) failed: %d\n", ret);
 			unregister_kretprobe(&hymo_krp_vfs_getattr);
 			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
 				unregister_kprobe(&hymofs_kprobes[i - 1]);
@@ -4652,7 +4657,7 @@ static int __init hymofs_lkm_init(void)
 		hymo_krp_iterate_dir.maxactive = 64;
 		ret = register_kretprobe(&hymo_krp_iterate_dir);
 		if (ret) {
-			pr_err("hymofs: register_kretprobe(iterate_dir) failed: %d\n", ret);
+			pr_err("HymoFS: register_kretprobe(iterate_dir) failed: %d\n", ret);
 			unregister_kretprobe(&hymo_krp_d_path);
 			unregister_kretprobe(&hymo_krp_vfs_getattr);
 			for (i = HYMOFS_VFS_HOOK_COUNT; i > 1; i--)
@@ -4662,7 +4667,7 @@ static int __init hymofs_lkm_init(void)
 			hymofs_tracepoint_path_exit();
 			return ret;
 		}
-		pr_info("hymofs: kretprobes vfs_getattr, d_path, iterate_dir registered\n");
+		pr_info("HymoFS: kretprobes vfs_getattr, d_path, iterate_dir registered\n");
 
 		/* vfs_getxattr kretprobe for SELinux context spoofing (optional) */
 		{
@@ -4677,36 +4682,36 @@ static int __init hymofs_lkm_init(void)
 				ret = register_kretprobe(&hymo_krp_vfs_getxattr);
 				if (ret == 0) {
 					hymo_getxattr_kprobe_registered = 1;
-					pr_info("hymofs: kretprobe vfs_getxattr registered (SELinux spoof)\n");
+					pr_info("HymoFS: kretprobe vfs_getxattr registered (SELinux spoof)\n");
 				} else {
-					pr_warn("hymofs: register_kretprobe(vfs_getxattr) failed: %d\n", ret);
+					pr_warn("HymoFS: register_kretprobe(vfs_getxattr) failed: %d\n", ret);
 				}
 			} else {
-				pr_warn("hymofs: vfs_getxattr not found, SELinux context spoofing disabled\n");
+				pr_warn("HymoFS: vfs_getxattr not found, SELinux context spoofing disabled\n");
 			}
 		}
 		} /* !hymo_vfs_use_ftrace */
 	}
-	pr_info("hymofs: initialized (%d VFS %s + GET_FD via %s)\n",
+	pr_info("HymoFS: initialized (%d VFS %s + GET_FD via %s)\n",
 		(int)(HYMOFS_VFS_HOOK_COUNT - (hymofs_tracepoint_path_registered() ? 1 : 0)),
 		hymo_vfs_use_ftrace ? "ftrace" : "kprobes",
 		hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
 			"sys_enter/sys_exit tracepoint" : "kprobes");
 	} else {
-		pr_alert("hymofs: skipping VFS hooks (hymo_skip_vfs=1)\n");
-		pr_info("hymofs: initialized (VFS hooks skipped, GET_FD via %s)\n",
+		pr_alert("HymoFS: skipping VFS hooks (hymo_skip_vfs=1)\n");
+		pr_info("HymoFS: initialized (VFS hooks skipped, GET_FD via %s)\n",
 			hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
 				"sys_enter/sys_exit tracepoint" : "kprobes");
 	}
 #else
-	pr_info("hymofs: initialized (GET_FD only, VFS kprobes disabled)\n");
+	pr_info("HymoFS: initialized (GET_FD only, VFS kprobes disabled)\n");
 #endif
 	return 0;
 }
 
 static void __exit hymofs_lkm_exit(void)
 {
-	pr_info("hymofs: shutting down\n");
+	pr_info("HymoFS: shutting down\n");
 
 	if (hymo_statfs_kretprobe_registered)
 		unregister_kretprobe(&hymo_krp_statfs);
@@ -4800,7 +4805,7 @@ static void __exit hymofs_lkm_exit(void)
 	}
 	if (hymo_filldir_cache)
 		kmem_cache_destroy(hymo_filldir_cache);
-	pr_info("hymofs: unloaded\n");
+	pr_info("HymoFS: unloaded\n");
 }
 
 module_init(hymofs_lkm_init);
