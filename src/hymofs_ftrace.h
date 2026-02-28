@@ -42,6 +42,20 @@ static inline void hymofs_ftrace_unregister(void)
 {
 }
 
+static inline int hymo_ftrace_krp_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	(void)ri;
+	(void)regs;
+	return 0;
+}
+
+static inline int hymo_ftrace_krp_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	(void)ri;
+	(void)regs;
+	return 0;
+}
+
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 #endif /* _HYMOFS_FTRACE_H */

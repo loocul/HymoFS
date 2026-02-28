@@ -8,9 +8,9 @@ obj-m += hymofs_lkm.o
 hymofs_lkm-objs := hymofs_core.o hymofs_tracepoint.o hymofs_ftrace.o
 
 ccflags-y += -gz=none
-# Ftrace: always compile (headers need types); runtime __symbol_get, fallback to kprobes if unavailable.
-# CONFIG_FUNCTION_TRACER: ftrace_func_t typedef in ftrace.h (pulled in via kprobes.h).
-ccflags-y += -DCONFIG_DYNAMIC_FTRACE=1 -DCONFIG_FUNCTION_TRACER=1
+# Do not force CONFIG_DYNAMIC_FTRACE / CONFIG_FUNCTION_TRACER from module flags.
+# They must follow target kernel Kconfig, otherwise some arches/toolchains
+# (e.g. x86 with missing fentry flags) fail at asm/ftrace.h checks.
 # Do NOT add -fno-sanitize=cfi here: init/exit must have kernel-expected CFI type for
 # do_one_initcall. Use HYMO_NOCFI only on functions that make indirect calls to resolved symbols.
 
