@@ -38,6 +38,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/fcntl.h>
 #include <linux/percpu.h>
+#include <linux/smp.h>
 #include <linux/version.h>
 #include <linux/utsname.h>
 #include <linux/mount.h>
@@ -75,18 +76,36 @@ static bool hymofs_enabled;
 static atomic_t hymo_rule_count = ATOMIC_INIT(0);
 static atomic_t hymo_hide_count = ATOMIC_INIT(0);
 
-static DEFINE_PER_CPU(unsigned int, hymo_kprobe_reent);
-static DEFINE_PER_CPU(char[HYMO_PATH_BUF], hymo_getname_path_buf);
+/* vmalloc-based per-CPU data to avoid percpu allocator exhaustion on 6.6 Qualcomm. */
+struct hymo_percpu {
+	unsigned int kprobe_reent;
+	int iterate_did_swap;
+	int in_populate_inject;
+	int override_fd;
+	int override_active;
+#if defined(__aarch64__) || defined(__x86_64__)
+	struct {
+		char __user *buf;
+		size_t count;
+		int active;
+	} cmdline_ctx;
+#endif
+};
+static struct hymo_percpu *hymo_percpu_base;
+
+static inline struct hymo_percpu *hymo_this_cpu(void)
+{
+	return hymo_percpu_base + smp_processor_id();
+}
+
+/* vmalloc-based per-CPU path buffers */
+static char *hymo_getname_buf_base;
+static char *hymo_iterate_buf_base;
 
 static atomic_long_t hymo_ioctl_tgid = ATOMIC_LONG_INIT(0);
 static atomic_long_t hymo_xattr_source_tgid = ATOMIC_LONG_INIT(0);
 
-DEFINE_PER_CPU(int, hymo_iterate_did_swap);
 static struct kmem_cache *hymo_filldir_cache;
-/* When set, we're inside hymofs_populate_injected_list; skip ctx swap in iterate_dir pre. */
-static DEFINE_PER_CPU(int, hymo_in_populate_inject);
-/* Per-CPU path buffer for iterate_dir pre-handler (used only with preempt disabled). */
-static DEFINE_PER_CPU(char[HYMO_ITERATE_PATH_BUF], hymo_iterate_dir_path);
 
 /* Offset base for injected entries (filldir pos); must not collide with real inode offsets. */
 #define HYMO_MAGIC_POS 0x1000000000000000ULL
@@ -686,9 +705,9 @@ next_entry:
 						.head = head,
 						.dir_path = target_node->target,
 					};
-					this_cpu_write(hymo_in_populate_inject, 1);
+					hymo_this_cpu()->in_populate_inject = 1;
 					iterate_dir(f, &mctx.ctx);
-					this_cpu_write(hymo_in_populate_inject, 0);
+					hymo_this_cpu()->in_populate_inject = 0;
 					fput(f);
 				}
 				put_cred(cred);
@@ -2210,19 +2229,7 @@ static int hymo_dummy_mode_param;
 module_param_named(hymo_dummy_mode, hymo_dummy_mode_param, int, 0600);
 MODULE_PARM_DESC(hymo_dummy_mode, "1=exit immediately after init starts (for testing).");
 
-/* Per-CPU: when set, kretprobe will replace return value with this fd. */
-static DEFINE_PER_CPU(int, hymo_override_fd);
-static DEFINE_PER_CPU(int, hymo_override_active);
-
-/* Per-CPU: cmdline spoof via tracepoint/kretprobe on read syscall (aarch64/x86_64 only) */
-#if defined(__aarch64__) || defined(__x86_64__)
-struct hymo_cmdline_read_ctx {
-	char __user *buf;
-	size_t count;
-	int active;
-};
-static DEFINE_PER_CPU(struct hymo_cmdline_read_ctx, hymo_cmdline_read_ctx);
-#endif
+/* override_fd/override_active and cmdline_ctx now in hymo_percpu_base */
 
 static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 {
@@ -2249,8 +2256,8 @@ static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 		int fd = hymofs_get_anon_fd();
 		if (fd < 0)
 			return 0;
-		this_cpu_write(hymo_override_fd, fd);
-		this_cpu_write(hymo_override_active, 1);
+		hymo_this_cpu()->override_fd = fd;
+		hymo_this_cpu()->override_active = 1;
 	}
 	return 0;
 }
@@ -2269,14 +2276,14 @@ static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
  */
 static int hymo_ni_syscall_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	if (!this_cpu_read(hymo_override_active))
+	if (!hymo_this_cpu()->override_active)
 		return 0;
 #if defined(__aarch64__)
-	regs->regs[0] = this_cpu_read(hymo_override_fd);
+	regs->regs[0] = hymo_this_cpu()->override_fd;
 #elif defined(__x86_64__)
-	regs->ax = this_cpu_read(hymo_override_fd);
+	regs->ax = hymo_this_cpu()->override_fd;
 #endif
-	this_cpu_write(hymo_override_active, 0);
+	hymo_this_cpu()->override_active = 0;
 	return 0;
 }
 
@@ -2346,8 +2353,8 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 		int fd = hymofs_get_anon_fd();
 		if (fd < 0)
 			return 0;
-		this_cpu_write(hymo_override_fd, fd);
-		this_cpu_write(hymo_override_active, 1);
+		hymo_this_cpu()->override_fd = fd;
+		hymo_this_cpu()->override_active = 1;
 	}
 #endif
 	return 0;
@@ -3369,8 +3376,8 @@ void hymofs_handle_sys_enter_getfd(struct pt_regs *regs, long id)
 	if (id == (long)hymo_syscall_nr_param && a0 == HYMO_MAGIC1 && a1 == HYMO_MAGIC2 && a2 == (unsigned long)HYMO_CMD_GET_FD) {
 		int fd = hymofs_get_anon_fd();
 		if (fd >= 0) {
-			this_cpu_write(hymo_override_fd, fd);
-			this_cpu_write(hymo_override_active, 1);
+			hymo_this_cpu()->override_fd = fd;
+			hymo_this_cpu()->override_active = 1;
 		}
 	}
 }
@@ -3378,16 +3385,16 @@ void hymofs_handle_sys_enter_getfd(struct pt_regs *regs, long id)
 void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret)
 {
 	(void)ret;
-	if (!this_cpu_read(hymo_override_active))
+	if (!hymo_this_cpu()->override_active)
 		return;
 #if defined(__aarch64__)
-	regs->regs[0] = this_cpu_read(hymo_override_fd);
+	regs->regs[0] = hymo_this_cpu()->override_fd;
 #elif defined(__x86_64__)
-	regs->ax = this_cpu_read(hymo_override_fd);
+	regs->ax = hymo_this_cpu()->override_fd;
 #elif defined(__arm__)
-	regs->uregs[0] = this_cpu_read(hymo_override_fd);
+	regs->uregs[0] = hymo_this_cpu()->override_fd;
 #endif
-	this_cpu_write(hymo_override_active, 0);
+	hymo_this_cpu()->override_active = 0;
 }
 
 #if defined(__aarch64__) || defined(__x86_64__)
@@ -3440,22 +3447,21 @@ void hymofs_handle_sys_enter_cmdline(struct pt_regs *regs, long id)
 	if (!hymo_fd_is_proc_cmdline((int)fd))
 		return;
 
-	this_cpu_ptr(&hymo_cmdline_read_ctx)->buf = (char __user *)buf;
-	this_cpu_ptr(&hymo_cmdline_read_ctx)->count = (size_t)count;
-	this_cpu_ptr(&hymo_cmdline_read_ctx)->active = 1;
+	hymo_this_cpu()->cmdline_ctx.buf = (char __user *)buf;
+	hymo_this_cpu()->cmdline_ctx.count = (size_t)count;
+	hymo_this_cpu()->cmdline_ctx.active = 1;
 #endif
 }
 
 void hymofs_handle_sys_exit_cmdline(struct pt_regs *regs, long ret)
 {
 #if defined(__aarch64__) || defined(__x86_64__)
-	struct hymo_cmdline_read_ctx *ctx;
+	struct hymo_percpu *pcpu = hymo_this_cpu();
 	size_t spoof_len, write_len;
 
-	ctx = this_cpu_ptr(&hymo_cmdline_read_ctx);
-	if (!ctx->active || ret <= 0)
+	if (!pcpu->cmdline_ctx.active || ret <= 0)
 		goto out;
-	ctx->active = 0;
+	pcpu->cmdline_ctx.active = 0;
 
 	if (!READ_ONCE(hymo_cmdline_spoof_active))
 		goto out;
@@ -3470,12 +3476,12 @@ void hymofs_handle_sys_exit_cmdline(struct pt_regs *regs, long ret)
 		spoof_len = strnlen(c->cmdline, sizeof(c->cmdline) - 1);
 		/* Original cmdline ends with \n; match that */
 		write_len = spoof_len + 1; /* +1 for \n */
-		if (write_len > ctx->count)
-			write_len = ctx->count;
+		if (write_len > pcpu->cmdline_ctx.count)
+			write_len = pcpu->cmdline_ctx.count;
 		if (write_len > 0) {
 			size_t n = (spoof_len < write_len) ? spoof_len : write_len - 1;
-			if (copy_to_user(ctx->buf, c->cmdline, n) == 0) {
-				if (n < write_len && copy_to_user(ctx->buf + n, "\n", 1) == 0)
+			if (copy_to_user(pcpu->cmdline_ctx.buf, c->cmdline, n) == 0) {
+				if (n < write_len && copy_to_user(pcpu->cmdline_ctx.buf + n, "\n", 1) == 0)
 					write_len = n + 1;
 				else
 					write_len = n;
@@ -3515,7 +3521,7 @@ void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id)
 	if (!filename_user)
 		return;
 
-	buf = this_cpu_ptr(hymo_getname_path_buf);
+	buf = hymo_getname_buf_base + (smp_processor_id() * HYMO_PATH_BUF);
 	if (hymo_strncpy_from_user_nofault) {
 		long ret = hymo_strncpy_from_user_nofault(buf, filename_user, HYMO_PATH_BUF - 1);
 		if (ret < 0)
@@ -3561,7 +3567,7 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 
 	(void)p;
 
-	if (this_cpu_read(hymo_kprobe_reent))
+	if (hymo_this_cpu()->kprobe_reent)
 		return 0;
 	/* Skip when current is in ioctl path resolution (avoids reent / deadlock with metamount+hymod). */
 	if (atomic_long_read(&hymo_ioctl_tgid) == (long)task_tgid_vnr(current))
@@ -3578,7 +3584,7 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 	if (!filename_user)
 		return 0;
 
-	buf = this_cpu_ptr(hymo_getname_path_buf);
+	buf = hymo_getname_buf_base + (smp_processor_id() * HYMO_PATH_BUF);
 	if (hymo_strncpy_from_user_nofault) {
 		long ret = hymo_strncpy_from_user_nofault(buf, filename_user, HYMO_PATH_BUF - 1);
 		if (ret < 0)
@@ -3592,14 +3598,14 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 
 	/* Hide: skip original and return error (no putname needed) */
 	if (unlikely(hymofs_should_hide(buf))) {
-		this_cpu_write(hymo_kprobe_reent, 1);
+		hymo_this_cpu()->kprobe_reent = 1;
 		HYMO_REG0(regs) = (unsigned long)ERR_PTR(-ENOENT);
 		instruction_pointer_set(regs, HYMO_LR(regs));
 		HYMO_POP_STACK(regs);
 #if defined(__x86_64__)
 		regs->ax = (unsigned long)ERR_PTR(-ENOENT);
 #endif
-		this_cpu_write(hymo_kprobe_reent, 0);
+		hymo_this_cpu()->kprobe_reent = 0;
 		return 1;
 	}
 
@@ -3615,9 +3621,9 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 	if (hymo_getname_kernel) {
 		struct filename *fname;
 
-		this_cpu_write(hymo_kprobe_reent, 1);
+		hymo_this_cpu()->kprobe_reent = 1;
 		fname = hymo_getname_kernel(target);
-		this_cpu_write(hymo_kprobe_reent, 0);
+		hymo_this_cpu()->kprobe_reent = 0;
 		kfree(target);
 		if (IS_ERR(fname))
 			return 0;
@@ -3678,7 +3684,7 @@ HYMO_NOCFI int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri,
 		return 0;
 	if (atomic_long_read(&hymo_ioctl_tgid) == (long)task_tgid_vnr(current))
 		return 0;
-	if (this_cpu_read(hymo_in_populate_inject))
+	if (hymo_this_cpu()->in_populate_inject)
 		return 0;
 	if (atomic_read(&hymo_rule_count) == 0)
 		return 0;
@@ -4089,11 +4095,11 @@ HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 	const char *dname;
 
 	(void)p;
-	this_cpu_write(hymo_iterate_did_swap, 0);
+	hymo_this_cpu()->iterate_did_swap = 0;
 
 	if (atomic_long_read(&hymo_ioctl_tgid) == (long)task_tgid_vnr(current))
 		return 0;
-	if (this_cpu_read(hymo_in_populate_inject))
+	if (hymo_this_cpu()->in_populate_inject)
 		return 0;
 	if (!READ_ONCE(hymofs_enabled))
 		return 0;
@@ -4136,7 +4142,7 @@ HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 		 * traverse hash to get merge_target_dentries. Most dirs skip this.
 		 */
 		if (atomic_read(&hymo_rule_count) > 0 && w->dir_has_inject) {
-			char *buf = this_cpu_ptr(hymo_iterate_dir_path);
+			char *buf = hymo_iterate_buf_base + (smp_processor_id() * HYMO_ITERATE_PATH_BUF);
 			char *dp = ERR_PTR(-ENOENT);
 
 			if (hymo_d_absolute_path)
@@ -4189,11 +4195,11 @@ HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 	if (!w->dir_has_hidden && !w->dir_has_inject &&
 	    (!hymo_stealth_enabled || w->dir_path_len != 4)) {
 		kmem_cache_free(hymo_filldir_cache, w);
-		this_cpu_write(hymo_iterate_did_swap, 0);
+		hymo_this_cpu()->iterate_did_swap = 0;
 		return 0;
 	}
 
-	this_cpu_write(hymo_iterate_did_swap, 1);
+	hymo_this_cpu()->iterate_did_swap = 1;
 	HYMO_REG1(regs) = (unsigned long)&w->wrap_ctx;
 	return 0;
 }
@@ -4358,6 +4364,22 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_inject_dirs);
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
+
+	/* vmalloc per-CPU data and path buffers (avoids percpu allocator exhaustion on 6.6 Qualcomm) */
+	hymo_percpu_base = vmalloc(nr_cpu_ids * sizeof(struct hymo_percpu));
+	hymo_getname_buf_base = vmalloc(nr_cpu_ids * HYMO_PATH_BUF);
+	hymo_iterate_buf_base = vmalloc(nr_cpu_ids * HYMO_ITERATE_PATH_BUF);
+	if (!hymo_percpu_base || !hymo_getname_buf_base || !hymo_iterate_buf_base) {
+		vfree(hymo_percpu_base);
+		vfree(hymo_getname_buf_base);
+		vfree(hymo_iterate_buf_base);
+		hymo_percpu_base = NULL;
+		hymo_getname_buf_base = NULL;
+		hymo_iterate_buf_base = NULL;
+		pr_err("HymoFS: failed to allocate per-CPU buffers\n");
+		return -ENOMEM;
+	}
+	memset(hymo_percpu_base, 0, nr_cpu_ids * sizeof(struct hymo_percpu));
 
 	pr_alert("HymoFS: STAGE 4: resolving /system path\n");
 	/* Resolve /system device number for stat spoofing */
@@ -4982,6 +5004,12 @@ static void __exit hymofs_lkm_exit(void)
 	}
 	if (hymo_filldir_cache)
 		kmem_cache_destroy(hymo_filldir_cache);
+	vfree(hymo_percpu_base);
+	vfree(hymo_getname_buf_base);
+	vfree(hymo_iterate_buf_base);
+	hymo_percpu_base = NULL;
+	hymo_getname_buf_base = NULL;
+	hymo_iterate_buf_base = NULL;
 	pr_info("HymoFS: unloaded\n");
 }
 

@@ -64,7 +64,7 @@
 
 /* Max path length in getname_flags pre-handler buffer. */
 #define HYMO_PATH_BUF               512
-/* iterate_dir path buffer; keep small to avoid percpu OOM on low-mem devices */
+/* iterate_dir path buffer. Both use vmalloc (not percpu) to avoid reserved chunk exhaustion. */
 #define HYMO_ITERATE_PATH_BUF       512
 
 /* dir_context.actor return type: 6.1+ uses bool */
@@ -226,7 +226,7 @@ struct hymo_iterate_ri_data {
 	struct hymofs_filldir_wrapper *wrapper;
 };
 
-DECLARE_PER_CPU(int, hymo_iterate_did_swap);
+/* hymo_iterate_did_swap is now in hymo_percpu (vmalloc-based) in hymofs_core.c */
 
 /* ======================================================================
  * Logging

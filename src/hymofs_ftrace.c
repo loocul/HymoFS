@@ -16,7 +16,8 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
-#include <linux/percpu.h>
+#include <linux/smp.h>
+#include <linux/vmalloc.h>
 #include <linux/ftrace.h>
 #include "hymofs_lkm.h"
 #include "hymofs_ftrace.h"
@@ -33,9 +34,18 @@ struct hymo_ftrace_slot {
 	} u;
 };
 
-static DEFINE_PER_CPU(struct hymo_ftrace_slot[HYMO_FTRACE_SLOT_DEPTH], hymo_ftrace_slots);
-static DEFINE_PER_CPU(int, hymo_ftrace_depth);
-static DEFINE_PER_CPU(int, hymo_ftrace_cb_ran);
+/* vmalloc-based per-CPU ftrace state (avoids percpu allocator exhaustion on 6.6 Qualcomm) */
+struct hymo_ftrace_percpu {
+	struct hymo_ftrace_slot slots[HYMO_FTRACE_SLOT_DEPTH];
+	int depth;
+	int cb_ran;
+};
+static struct hymo_ftrace_percpu *hymo_ftrace_base;
+
+static inline struct hymo_ftrace_percpu *hymo_ftrace_this_cpu(void)
+{
+	return hymo_ftrace_base ? hymo_ftrace_base + smp_processor_id() : NULL;
+}
 static unsigned long hymo_ft_addr[4];
 static struct ftrace_ops hymo_ftrace_ops;
 
@@ -54,6 +64,7 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 				struct ftrace_ops *op, struct ftrace_regs *fregs)
 {
 	struct pt_regs *regs;
+	struct hymo_ftrace_percpu *pcpu;
 	struct hymo_ftrace_slot *slot;
 	int depth, type = -1;
 	static struct kprobe kp_dummy;
@@ -73,9 +84,12 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	if (!hymo_ft_addr[0] && !hymo_ft_addr[1] && !hymo_ft_addr[2] && !hymo_ft_addr[3])
 		return;
 
-	this_cpu_write(hymo_ftrace_cb_ran, 0);
+	pcpu = hymo_ftrace_this_cpu();
+	if (!pcpu)
+		return;
 
-	depth = this_cpu_read(hymo_ftrace_depth);
+	pcpu->cb_ran = 0;
+	depth = pcpu->depth;
 	if (depth >= HYMO_FTRACE_SLOT_DEPTH || depth < 0)
 		return;
 
@@ -90,9 +104,9 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 	else
 		return;
 
-	slot = &this_cpu_ptr(hymo_ftrace_slots)[depth];
-	this_cpu_write(hymo_ftrace_depth, depth + 1);
-	this_cpu_write(hymo_ftrace_cb_ran, 1);
+	slot = &pcpu->slots[depth];
+	pcpu->depth = depth + 1;
+	pcpu->cb_ran = 1;
 	slot->type = type;
 
 	if (type == 0) {
@@ -124,23 +138,24 @@ static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 
 int hymo_ftrace_krp_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	struct hymo_ftrace_percpu *pcpu;
 	int depth;
 
 	(void)regs;
 	*(struct hymo_ftrace_slot **)ri->data = NULL;
-	if (!this_cpu_read(hymo_ftrace_cb_ran))
+	pcpu = hymo_ftrace_this_cpu();
+	if (!pcpu || !pcpu->cb_ran)
 		return 0;
-	depth = this_cpu_read(hymo_ftrace_depth);
+	depth = pcpu->depth;
 	if (depth > 0 && depth <= HYMO_FTRACE_SLOT_DEPTH)
-		*(struct hymo_ftrace_slot **)ri->data =
-			&this_cpu_ptr(hymo_ftrace_slots)[depth - 1];
+		*(struct hymo_ftrace_slot **)ri->data = &pcpu->slots[depth - 1];
 	return 0;
 }
 
 int hymo_ftrace_krp_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	struct hymo_ftrace_percpu *pcpu;
 	struct hymo_ftrace_slot *slot;
-	int depth;
 
 	slot = *(struct hymo_ftrace_slot **)ri->data;
 	if (!slot)
@@ -160,9 +175,9 @@ int hymo_ftrace_krp_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 			hymo_krp_vfs_getxattr_ret(&r, regs);
 		}
 	}
-	depth = this_cpu_read(hymo_ftrace_depth);
-	if (depth > 0)
-		this_cpu_write(hymo_ftrace_depth, depth - 1);
+	pcpu = hymo_ftrace_this_cpu();
+	if (pcpu && pcpu->depth > 0)
+		pcpu->depth--;
 	return 0;
 }
 
@@ -171,13 +186,24 @@ int hymofs_ftrace_try_register(unsigned long addr[4])
 	int i, ret;
 	static const char *ft_syms[] = {"vfs_getattr", "d_path", "iterate_dir", "vfs_getxattr"};
 
+	hymo_ftrace_base = vmalloc(nr_cpu_ids * sizeof(struct hymo_ftrace_percpu));
+	if (!hymo_ftrace_base)
+		return -ENOMEM;
+	memset(hymo_ftrace_base, 0, nr_cpu_ids * sizeof(struct hymo_ftrace_percpu));
+
 	for (i = 0; i < 4; i++) {
 		addr[i] = hymofs_lookup_name(ft_syms[i]);
 		/* vfs_getxattr is optional */
-		if (!addr[i] && i < 3)
+		if (!addr[i] && i < 3) {
+			vfree(hymo_ftrace_base);
+			hymo_ftrace_base = NULL;
 			return -ENOENT;
-		if (addr[i] && IS_ERR_VALUE(addr[i]))
+		}
+		if (addr[i] && IS_ERR_VALUE(addr[i])) {
+			vfree(hymo_ftrace_base);
+			hymo_ftrace_base = NULL;
 			return -EINVAL;
+		}
 	}
 	for (i = 0; i < 4; i++)
 		hymo_ft_addr[i] = addr[i];
@@ -186,11 +212,16 @@ int hymofs_ftrace_try_register(unsigned long addr[4])
 	hymo_ftrace_ops.func = hymo_ftrace_callback;
 	hymo_ftrace_ops.flags = FTRACE_OPS_FL_SAVE_REGS;
 	ret = register_ftrace_function(&hymo_ftrace_ops);
-	if (ret != 0)
+	if (ret != 0) {
+		vfree(hymo_ftrace_base);
+		hymo_ftrace_base = NULL;
 		return ret;
+	}
 	ret = ftrace_set_filter_ips(&hymo_ftrace_ops, hymo_ft_addr, 4, 0, 0);
 	if (ret != 0) {
 		unregister_ftrace_function(&hymo_ftrace_ops);
+		vfree(hymo_ftrace_base);
+		hymo_ftrace_base = NULL;
 		return ret;
 	}
 	return 0;
@@ -199,6 +230,8 @@ int hymofs_ftrace_try_register(unsigned long addr[4])
 void hymofs_ftrace_unregister(void)
 {
 	unregister_ftrace_function(&hymo_ftrace_ops);
+	vfree(hymo_ftrace_base);
+	hymo_ftrace_base = NULL;
 }
 
 #endif /* CONFIG_DYNAMIC_FTRACE */
