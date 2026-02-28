@@ -18,9 +18,9 @@
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
-/* Workaround: kprobes.h -> ftrace.h uses arch_ftrace_get_regs; android15-6.6
- * toolchain may not see the arch definition. */
-#ifndef arch_ftrace_get_regs
+#include <linux/version.h>
+/* 6.6+ may call arch_ftrace_get_regs without defining it in ftrace.h. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && !defined(arch_ftrace_get_regs)
 #define arch_ftrace_get_regs(fregs) (NULL)
 #endif
 #include <linux/kprobes.h>

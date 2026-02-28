@@ -16,7 +16,8 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kallsyms.h>
-#ifndef arch_ftrace_get_regs
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && !defined(arch_ftrace_get_regs)
 #define arch_ftrace_get_regs(fregs) (NULL)
 #endif
 #include <linux/kprobes.h>
